@@ -70,7 +70,12 @@ export function createExtension(pi: any, deps: Deps = {}): void {
     log: (message) => log(message),
   });
 
-  let ui: { setStatus?: (key: string, value?: string) => void } | undefined;
+  let ui:
+    | {
+        setStatus?: (key: string, value?: string) => void;
+        notify?: (message: string, type?: string) => void;
+      }
+    | undefined;
   const registeredNames = new Set<string>();
 
   function uiSetStatus(status: string): void {
@@ -78,7 +83,11 @@ export function createExtension(pi: any, deps: Deps = {}): void {
   }
 
   function log(message: string): void {
-    process.stderr.write(`[channels] ${message}\n`);
+    // Raw stderr writes corrupt the TUI's input line (the text bleeds into
+    // the editor and sticks until pi exits). Once session_start has handed
+    // us ctx.ui, route through notify; stderr is only the pre-UI fallback.
+    if (ui?.notify) ui.notify(`[channels] ${message}`, "info");
+    else process.stderr.write(`[channels] ${message}\n`);
   }
 
   function registerTools(connections: Connection[]): void {
