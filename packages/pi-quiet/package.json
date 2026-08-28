@@ -1,6 +1,6 @@
 {
   "name": "pi-quiet",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Calm tool rendering for the pi coding agent: each bash call collapses to one line; ctrl+o brings back full built-in rendering. Display-only — execution, permissions, and model context are untouched.",
   "type": "module",
   "license": "MIT",
