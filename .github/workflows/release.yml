@@ -1,0 +1,44 @@
+name: release
+# Publish one workspace package from a tag shaped <package>-v<version>,
+# e.g. `pi-quiet-v0.1.0`.
+#
+# Auth is npm Trusted Publishing (OIDC): no tokens, no secrets. Each package
+# needs its trusted publisher configured once on npmjs.com (package settings →
+# Trusted Publisher → GitHub Actions → this repo + this workflow file), which
+# in turn requires the package to exist — so every package's FIRST publish is
+# a one-time manual `npm publish` from a maintainer machine. Tags handle
+# everything after that.
+#
+# npm provenance requires a public repository; this repo is private for now,
+# so publishes run without --provenance. Add it when the repo goes public.
+on:
+  push:
+    tags:
+      - "*-v*"
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted Publishing needs npm >= 11.5.1
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Resolve package from tag
+        id: pkg
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          name="${tag%-v*}"
+          version="${tag##*-v}"
+          [ -d "packages/$name" ] || { echo "no packages/$name for tag $tag" >&2; exit 1; }
+          manifest_version=$(node -p "require('./packages/$name/package.json').version")
+          [ "$manifest_version" = "$version" ] || { echo "tag version $version != package.json $manifest_version" >&2; exit 1; }
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - run: npm publish --workspace "packages/${{ steps.pkg.outputs.name }}" --access public

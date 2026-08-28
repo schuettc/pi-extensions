@@ -1,0 +1,40 @@
+{
+  "name": "channels.tools",
+  "version": "0.1.2",
+  "description": "Channels for the pi coding agent: connect channel servers that push events into a live session — wake it when idle, queue when busy — and proxy their tools. A client for the claude/channel convention.",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://channels.tools",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schuettc/pi-extensions.git",
+    "directory": "packages/channels.tools"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "channels",
+    "claude-channel",
+    "agent-wake",
+    "event-driven"
+  ],
+  "files": [
+    "src",
+    "examples",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --experimental-strip-types --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.6.0"
+  }
+}

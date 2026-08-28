@@ -1,0 +1,13 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "description": "Monorepo of pi coding-agent extensions: pi-quiet (calm tool rendering), Channels / channels.tools (wake sessions on external events).",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "pi-quiet",
+  "version": "0.1.1",
+  "description": "Calm tool rendering for the pi coding agent: each bash call collapses to one line; ctrl+o brings back full built-in rendering. Display-only — execution, permissions, and model context are untouched.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schuettc/pi-extensions.git",
+    "directory": "packages/pi-quiet"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "tui",
+    "tool-output",
+    "quiet"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@earendil-works/pi-tui": "^0.84.3",
+    "typescript": "^5.6.0"
+  }
+}
