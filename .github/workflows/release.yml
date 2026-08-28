@@ -9,8 +9,9 @@ name: release
 # a one-time manual `npm publish` from a maintainer machine. Tags handle
 # everything after that.
 #
-# npm provenance requires a public repository; this repo is private for now,
-# so publishes run without --provenance. Add it when the repo goes public.
+# Publishes carry npm provenance: a signed attestation binding the tarball
+# to the exact public commit and workflow run that built it (repo must stay
+# public for this to work).
 on:
   push:
     tags:
@@ -41,4 +42,4 @@ jobs:
           manifest_version=$(node -p "require('./packages/$name/package.json').version")
           [ "$manifest_version" = "$version" ] || { echo "tag version $version != package.json $manifest_version" >&2; exit 1; }
           echo "name=$name" >> "$GITHUB_OUTPUT"
-      - run: npm publish --workspace "packages/${{ steps.pkg.outputs.name }}" --access public
+      - run: npm publish --workspace "packages/${{ steps.pkg.outputs.name }}" --access public --provenance
