@@ -1,0 +1,37 @@
+{
+  "name": "pi-wakeup",
+  "version": "0.1.0",
+  "description": "schedule_wakeup / cancel_wakeup for the pi coding agent: session-local self-pacing, the pi analog of Claude Code's ScheduleWakeup dynamic mode.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schuettc/pi-extensions.git",
+    "directory": "packages/pi-wakeup"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "wakeup",
+    "scheduling",
+    "self-pacing"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "typescript": "^5.6.0"
+  }
+}
