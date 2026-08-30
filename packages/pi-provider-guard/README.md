@@ -1,4 +1,4 @@
-# pi-guardrails
+# pi-provider-guard
 
 A pi extension that keeps pi off the metered `anthropic` provider and appends your own harness policy prose into every turn.
 
@@ -11,7 +11,7 @@ A pi extension that keeps pi off the metered `anthropic` provider and appends yo
 ## Install
 
 ```sh
-pi install npm:pi-guardrails
+pi install npm:pi-provider-guard
 ```
 
 ## Policy prose is user-supplied
@@ -19,7 +19,7 @@ pi install npm:pi-guardrails
 **This package ships no baked-in policy prose.** The rules you want carried into every turn are read at runtime from your own config file:
 
 ```
-~/.pi/agent/extensions/pi-guardrails/config.json
+~/.pi/agent/extensions/pi-provider-guard/config.json
 ```
 
 with a `prose` field that is an array of strings:
