@@ -30,7 +30,11 @@ function fakePi() {
     sendMessage(message: unknown, opts: unknown) { customs.push({ msg: message, opts }); },
     registerTool(def: ToolDef) { registered.push(def.name); tools.set(def.name, def); },
     unregisterTool(name: string) { unregistered.push(name); tools.delete(name); },
-    getAllTools() { return [{ name: "bash" }, { name: "read" }]; },
+    // Faithful to pi 0.84.4: getAllTools() reads the full _toolDefinitions
+    // registry, so a tool this extension registered on a prior pass is still
+    // returned here (there is no working unregisterTool to evict it). A static
+    // [bash, read] would hide the reload self-collision this guards against.
+    getAllTools() { return [{ name: "bash" }, { name: "read" }, ...[...tools.keys()].map((name) => ({ name }))]; },
     getActiveTools() { return ["bash", "read"]; },
     setActiveTools(_names: string[]) {},
   };
@@ -158,6 +162,38 @@ test("a tool still works after a resume re-registers it against a fresh connecti
   assert.ok(tool, "fake_status must still be registered after resume");
   const result = (await tool.execute("call-1", {})) as { content: Array<{ text: string }> };
   assert.deepEqual(result.content, [{ type: "text", text: "fake ok" }]);
+  await fire("session_shutdown");
+});
+
+test("a reload does not self-collide: the second pass re-registers the bare name, dropping nothing", async () => {
+  // The reload self-collision: pi.getAllTools() returns this extension's own
+  // prior registration (no working unregisterTool in 0.84.4), so a naive
+  // builtins baseline mistakes the leaked fake_status for a builtin, prefixes
+  // to fake_fake_status, and after enough reloads even the prefixed name is
+  // taken and the tool is dropped — with a misleading "collides with a builtin"
+  // reason. The fix excludes the extension's own names from the baseline.
+  const { pi, fire, tools, registered } = fakePi();
+  createExtension(pi as never, {
+    env: {},
+    loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE] } }),
+  });
+  await fire("session_start", { reason: "startup" });
+  await new Promise((r) => setTimeout(r, 300));
+  // Two more reloads: without the fix, getAllTools() now reports fake_status,
+  // so the second pass prefixes and the third drops the prefixed name too.
+  await fire("session_start", { reason: "resume" });
+  await new Promise((r) => setTimeout(r, 300));
+  await fire("session_start", { reason: "resume" });
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(tools.has("fake_status"), "the bare name must survive every reload");
+  assert.ok(!tools.has("fake_fake_status"), "the extension must never prefix against its own prior registration");
+  assert.ok(
+    !registered.includes("fake_fake_status"),
+    `no reload may register a self-prefixed name; registered: ${registered.join(", ")}`,
+  );
+  const tool = tools.get("fake_status");
+  const result = (await tool!.execute("call-1", {})) as { content: Array<{ text: string }> };
+  assert.deepEqual(result.content, [{ type: "text", text: "fake ok" }], "the bare tool must still work after reloads");
   await fire("session_shutdown");
 });
 

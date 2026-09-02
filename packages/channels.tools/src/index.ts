@@ -77,6 +77,14 @@ export function createExtension(pi: any, deps: Deps = {}): void {
       }
     | undefined;
   const registeredNames = new Set<string>();
+  // Every name this extension has EVER registered, never cleared. pi 0.84.4
+  // has no working unregisterTool, so getAllTools() keeps returning our own
+  // prior registrations across reload/resume/fork. Without excluding them from
+  // the builtins baseline below, registerTools mistakes its own leaked tool
+  // for a builtin, prefixes it, and eventually drops it ("collides with a
+  // builtin"). registerTool replaces by name, so re-registering the bare
+  // self-namespaced name every reload is correct.
+  const ownNames = new Set<string>();
 
   function uiSetStatus(status: string): void {
     ui?.setStatus?.("channels", status === "" ? undefined : status);
@@ -91,7 +99,9 @@ export function createExtension(pi: any, deps: Deps = {}): void {
   }
 
   function registerTools(connections: Connection[]): void {
-    const builtins = (pi.getAllTools?.() ?? []).map((t: { name: string }) => t.name);
+    const builtins = (pi.getAllTools?.() ?? [])
+      .map((t: { name: string }) => t.name)
+      .filter((name: string) => !ownNames.has(name));
     const { resolved, dropped } = resolveToolNames(
       connections.map((c) => ({ name: c.name, tools: c.tools })),
       builtins,
@@ -143,6 +153,7 @@ export function createExtension(pi: any, deps: Deps = {}): void {
       // built from `connections.map(...)` above.
       const conn = connections.find((c) => c.name === entry.server)!;
       const def = conn.tools.find((t) => t.name === entry.original);
+      ownNames.add(entry.registered);
       registeredNames.add(entry.registered);
       pi.registerTool({
         name: entry.registered,
