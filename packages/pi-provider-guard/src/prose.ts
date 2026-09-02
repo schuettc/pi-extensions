@@ -17,14 +17,14 @@ export function appendPolicy(systemPrompt: string, prose: string[]): string {
 }
 
 // Best-effort loader for the extension's private policy prose. Reads
-// <home>/.pi/agent/extensions/pi-guardrails/config.json and returns its
+// <home>/.pi/agent/extensions/pi-provider-guard/config.json and returns its
 // `prose` string[] field; a missing/unreadable/malformed file, or a missing
 // or non-array `prose` field, yields [] — this must never throw.
 export function loadProse({ home }: { home: string }): string[] {
   let raw: string;
   try {
     raw = readFileSync(
-      join(home, ".pi", "agent", "extensions", "pi-guardrails", "config.json"),
+      join(home, ".pi", "agent", "extensions", "pi-provider-guard", "config.json"),
       "utf-8",
     );
   } catch {

@@ -1,4 +1,4 @@
-# pi-harness
+# pi-tmux-bridge
 
 A pi extension that feeds this terminal's tmux state from a running pi session — a status line reflecting model and context usage, an attention bell on the pane's own tty, and session-bus (muster) registration — so a pi session presents in tmux the way a harnessed coding session should.
 
@@ -14,7 +14,7 @@ Every handler is best-effort: it sits directly on a pi lifecycle event, and a ha
 ## Install
 
 ```sh
-pi install npm:pi-harness
+pi install npm:pi-tmux-bridge
 ```
 
 ## Tests

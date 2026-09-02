@@ -1,5 +1,5 @@
 {
-  "name": "pi-guardrails",
+  "name": "pi-provider-guard",
   "version": "0.1.0",
   "description": "A pi coding-agent extension that keeps pi off the metered anthropic provider and appends user-supplied harness policy prose to every turn.",
   "type": "module",
@@ -7,7 +7,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/schuettc/pi-extensions.git",
-    "directory": "packages/pi-guardrails"
+    "directory": "packages/pi-provider-guard"
   },
   "keywords": [
     "pi-package",
