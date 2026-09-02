@@ -1,6 +1,6 @@
 {
   "name": "channels.tools",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Channels for the pi coding agent: connect channel servers that push events into a live session — wake it when idle, queue when busy — and proxy their tools. A client for the claude/channel convention.",
   "type": "module",
   "license": "MIT",
