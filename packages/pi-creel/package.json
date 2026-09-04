@@ -1,0 +1,37 @@
+{
+  "name": "pi-creel",
+  "version": "0.1.0",
+  "description": "request_secret for the pi coding agent: capture an API key into a local .env via a tmux popup (the creel tool) so it never enters the chat/context.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schuettc/pi-extensions.git",
+    "directory": "packages/pi-creel"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "secret",
+    "api-key",
+    "dotenv"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "typescript": "^5.6.0"
+  }
+}
