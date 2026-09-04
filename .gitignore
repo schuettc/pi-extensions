@@ -1,3 +1,6 @@
 node_modules/
 *.tgz
 .DS_Store
+
+# SDD design docs (plans/specs) — kept local, not committed
+docs/superpowers/
