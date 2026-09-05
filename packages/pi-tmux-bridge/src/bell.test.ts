@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ringBell, raiseAttention } from "./bell.ts";
+import { ringBell, raiseAttention, raisePermissionAttention, clearPermissionAttention } from "./bell.ts";
 
 const ctx = { socket: "proj-pi", pane: "%47" };
 const BEL = String.fromCharCode(7);
@@ -35,4 +35,31 @@ test("an unresolvable session raises nothing rather than raising the wrong thing
   const calls: string[] = [];
   raiseAttention(ctx, { session: () => undefined, run: (cmd) => calls.push(cmd) });
   assert.deepEqual(calls, []);
+});
+
+test("permission attention calls claude-attn raise-wait with the session", () => {
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  raisePermissionAttention(ctx, { session: () => "pi-97", run: (cmd, args) => calls.push({ cmd, args }) });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].cmd, /claude-attn$/);
+  assert.deepEqual(calls[0].args, ["raise-wait", "pi-97"]);
+});
+
+test("clearing permission attention calls claude-attn clear-wait with the session", () => {
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  clearPermissionAttention(ctx, { session: () => "pi-97", run: (cmd, args) => calls.push({ cmd, args }) });
+  assert.deepEqual(calls[0].args, ["clear-wait", "pi-97"]);
+});
+
+test("an unresolvable session neither raises nor clears the permission flag", () => {
+  const calls: string[] = [];
+  raisePermissionAttention(ctx, { session: () => undefined, run: (cmd) => calls.push(cmd) });
+  clearPermissionAttention(ctx, { session: () => undefined, run: (cmd) => calls.push(cmd) });
+  assert.deepEqual(calls, []);
+});
+
+test("a failing permission-attention call is swallowed — it must not fail a turn", () => {
+  assert.doesNotThrow(() =>
+    raisePermissionAttention(ctx, { session: () => "pi-97", run: () => { throw new Error("gone"); } }),
+  );
 });

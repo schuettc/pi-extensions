@@ -39,6 +39,41 @@ export function raiseAttention(
     run?: (cmd: string, args: string[]) => void;
   } = {},
 ): void {
+  runAttn(ctx, "raise", deps);
+}
+
+// The permission-waiting flag (@claude_attn_perm) is a SECOND, more urgent state
+// than the turn-done flag raiseAttention sets: it lights the 🔐 title prefix
+// (over the 🔔 of a settled turn) while a permission prompt waits on the
+// operator, and is cleared the moment the prompt is answered.
+export function raisePermissionAttention(
+  ctx: TmuxContext,
+  deps: {
+    session?: (socket: string, pane: string) => string | undefined;
+    run?: (cmd: string, args: string[]) => void;
+  } = {},
+): void {
+  runAttn(ctx, "raise-wait", deps);
+}
+
+export function clearPermissionAttention(
+  ctx: TmuxContext,
+  deps: {
+    session?: (socket: string, pane: string) => string | undefined;
+    run?: (cmd: string, args: string[]) => void;
+  } = {},
+): void {
+  runAttn(ctx, "clear-wait", deps);
+}
+
+function runAttn(
+  ctx: TmuxContext,
+  verb: string,
+  deps: {
+    session?: (socket: string, pane: string) => string | undefined;
+    run?: (cmd: string, args: string[]) => void;
+  },
+): void {
   const readSession = deps.session ?? sessionOfPane;
   const run =
     deps.run ??
@@ -48,7 +83,7 @@ export function raiseAttention(
   try {
     const session = readSession(ctx.socket, ctx.pane);
     if (!session) return;
-    run(ATTN, ["raise", session]);
+    run(ATTN, [verb, session]);
   } catch {
     // Best-effort: an attention flag must not fail a turn.
   }
