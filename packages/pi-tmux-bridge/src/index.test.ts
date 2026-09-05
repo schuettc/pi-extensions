@@ -6,10 +6,16 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 
 function fakePi() {
   const handlers = new Map<string, Handler[]>();
+  const busHandlers = new Map<string, Handler[]>();
   const sent: Array<{ message: unknown; options: unknown }> = [];
   const pi = {
     on(event: string, handler: Handler) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+    },
+    events: {
+      on(event: string, handler: Handler) {
+        busHandlers.set(event, [...(busHandlers.get(event) ?? []), handler]);
+      },
     },
     sendMessage(message: unknown, options?: unknown) {
       sent.push({ message, options });
@@ -28,7 +34,20 @@ function fakePi() {
     for (const h of handlers.get(event) ?? []) out.push(await h(payload, overrideCtx ?? ctx));
     return out;
   }
-  return { pi, ctx, fire, events: () => [...handlers.keys()], sent };
+  async function fireBus(event: string, payload: unknown = {}) {
+    const out: unknown[] = [];
+    for (const h of busHandlers.get(event) ?? []) out.push(await h(payload, undefined as never));
+    return out;
+  }
+  return {
+    pi,
+    ctx,
+    fire,
+    fireBus,
+    events: () => [...handlers.keys()],
+    busEvents: () => [...busHandlers.keys()],
+    sent,
+  };
 }
 
 // A tmux address that cannot collide with a real server or pane on the
@@ -496,4 +515,65 @@ test("session_shutdown tombstones and drops state ONLY on reason quit", async ()
     "reason quit must tombstone",
   );
   assert.equal(removed.length, 1, "reason quit must drop the state file");
+});
+
+test("a permission ui_prompt rings the bell and raises the permission flag", async () => {
+  const { pi, fire, fireBus } = fakePi();
+  const bells: unknown[] = [];
+  const perms: string[] = [];
+  createHarness(pi as never, {
+    tmux: () => ctxTmux,
+    raiseAttention: noopBell,
+    ringBell: (c) => bells.push(c),
+    raisePermissionAttention: () => perms.push("raise"),
+    clearPermissionAttention: () => perms.push("clear"),
+  });
+  await fire("session_start", { reason: "startup" });
+  await fireBus("permissions:ui_prompt", { requestId: "req-1", surface: "bash", value: "rm -rf x" });
+  assert.equal(bells.length, 1, "prompt must ring the bell");
+  assert.deepEqual(perms, ["raise"]);
+});
+
+test("the matching decision clears the permission flag; a stray one does not", async () => {
+  const { pi, fire, fireBus } = fakePi();
+  const perms: string[] = [];
+  createHarness(pi as never, {
+    tmux: () => ctxTmux,
+    raiseAttention: noopBell,
+    ringBell: noopBell,
+    raisePermissionAttention: () => perms.push("raise"),
+    clearPermissionAttention: () => perms.push("clear"),
+  });
+  await fire("session_start", { reason: "startup" });
+  await fireBus("permissions:ui_prompt", { requestId: "req-1" });
+  await fireBus("permissions:decision", { requestId: "other", result: "allow" });
+  assert.deepEqual(perms, ["raise"], "an unrelated decision must not clear the flag");
+  await fireBus("permissions:decision", { requestId: "req-1", result: "allow" });
+  assert.deepEqual(perms, ["raise", "clear"], "the resolving decision clears the flag");
+});
+
+test("a subagent node (never owned the pane) ignores permission prompts", async () => {
+  const { pi, fire, fireBus, ctx } = fakePi();
+  const perms: string[] = [];
+  const bells: unknown[] = [];
+  createHarness(pi as never, {
+    tmux: () => ctxTmux,
+    raiseAttention: noopBell,
+    ringBell: (c) => bells.push(c),
+    raisePermissionAttention: () => perms.push("raise"),
+    clearPermissionAttention: () => perms.push("clear"),
+  });
+  await fire("session_start", { reason: "startup" }, { ...ctx, mode: "print" });
+  await fireBus("permissions:ui_prompt", { requestId: "req-1" });
+  assert.deepEqual(perms, [], "a non-owning node must not raise the flag");
+  assert.deepEqual(bells, [], "a non-owning node must not ring");
+});
+
+test("it subscribes to exactly the pi.events channels it needs", async () => {
+  const { pi, busEvents } = fakePi();
+  createHarness(pi as never, { raiseAttention: noopBell, tmux: () => ctxTmux });
+  assert.deepEqual(
+    busEvents().sort(),
+    ["permissions:decision", "permissions:ui_prompt"].sort(),
+  );
 });

@@ -1,6 +1,6 @@
 {
   "name": "pi-tmux-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A pi coding-agent extension that feeds this terminal's tmux state (status bar, attention bell, session bus) from a pi session.",
   "type": "module",
   "license": "MIT",

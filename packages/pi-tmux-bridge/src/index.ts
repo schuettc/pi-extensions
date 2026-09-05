@@ -1,7 +1,12 @@
 import { resolveTmux, tmux as runTmuxDefault } from "./tmux.ts";
 import type { TmuxContext } from "./tmux.ts";
 import { writeState as writeStateDefault, removeState as removeStateDefault } from "./state.ts";
-import { ringBell as ringBellDefault, raiseAttention as raiseAttentionDefault } from "./bell.ts";
+import {
+  ringBell as ringBellDefault,
+  raiseAttention as raiseAttentionDefault,
+  raisePermissionAttention as raisePermissionAttentionDefault,
+  clearPermissionAttention as clearPermissionAttentionDefault,
+} from "./bell.ts";
 import { sessionStart, drain, sessionEnd, become } from "./muster.ts";
 import type { Run } from "./muster.ts";
 
@@ -13,6 +18,8 @@ type Deps = {
   removeState?: (ctx: TmuxContext) => void;
   ringBell?: (ctx: TmuxContext) => void;
   raiseAttention?: (ctx: TmuxContext) => void;
+  raisePermissionAttention?: (ctx: TmuxContext) => void;
+  clearPermissionAttention?: (ctx: TmuxContext) => void;
 };
 
 // The session id reaches tmux as a session option value; sanitize before it
@@ -46,6 +53,10 @@ export function createHarness(pi: any, deps: Deps = {}): void {
   const removeState = deps.removeState ?? ((ctx) => removeStateDefault(ctx));
   const ringBell = deps.ringBell ?? ((ctx) => ringBellDefault(ctx));
   const raiseAttention = deps.raiseAttention ?? ((ctx) => raiseAttentionDefault(ctx));
+  const raisePermissionAttention =
+    deps.raisePermissionAttention ?? ((ctx) => raisePermissionAttentionDefault(ctx));
+  const clearPermissionAttention =
+    deps.clearPermissionAttention ?? ((ctx) => clearPermissionAttentionDefault(ctx));
 
   // Loop guard for the drain on agent_settled: injecting a block reason
   // starts a turn, which produces another settle. Without tracking whether
@@ -63,6 +74,18 @@ export function createHarness(pi: any, deps: Deps = {}): void {
   // again would be a pointless round-trip.
   let lastAlias: string | undefined;
 
+  // A permission prompt pauses mid-turn, so neither turn_end nor agent_settled
+  // fires while it waits — the two events that normally light the pane. The
+  // permission system announces that exact moment on pi.events; we ring and
+  // raise the 🔐 flag on the prompt, and drop it on the matching decision.
+  // pi.events handlers get no ctx, so ownership is captured here from the one
+  // session_start that owns the pane (a subagent node's stays false).
+  let ownsThisPane = false;
+  // Clear only on the decision that resolves the prompt we lit: one tool call
+  // runs several gates, and an unrelated auto-allow decision must not drop a
+  // flag a still-pending prompt is holding.
+  let pendingPromptRequestId: string | undefined;
+
   // Only an interactive session owns the pane's identity. Subagent sessions
   // (pi-subagents' createAgentSession) run IN-PROCESS: they load this
   // extension too, inherit $TMUX/$TMUX_PANE, and their extension mode stays
@@ -74,8 +97,27 @@ export function createHarness(pi: any, deps: Deps = {}): void {
   // for the same reason — they are guests, not the pane's owner.
   const ownsPane = (ctx: any): boolean => ctx?.mode === "tui";
 
+  pi.events?.on?.("permissions:ui_prompt", (data: any) => safe(() => {
+    if (!ownsThisPane) return;
+    const t = getTmux();
+    if (!t) return;
+    pendingPromptRequestId = data?.requestId;
+    ringBell(t);
+    raisePermissionAttention(t);
+  }));
+
+  pi.events?.on?.("permissions:decision", (data: any) => safe(() => {
+    if (!ownsThisPane) return;
+    if (!pendingPromptRequestId || data?.requestId !== pendingPromptRequestId) return;
+    pendingPromptRequestId = undefined;
+    const t = getTmux();
+    if (!t) return;
+    clearPermissionAttention(t);
+  }));
+
   pi.on("session_start", (event: any, ctx: any) => safe(() => {
     if (!ownsPane(ctx)) return;
+    ownsThisPane = true;
     const t = getTmux();
     if (!t) return;
     const rawSessionId = String(ctx.sessionManager.getSessionId());
