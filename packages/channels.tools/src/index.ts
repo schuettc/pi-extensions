@@ -4,10 +4,12 @@ import type { ChannelServerDef } from "./config.ts";
 import { ConnectionManager } from "./connection.ts";
 import type { Connection } from "./connection.ts";
 import { createWake } from "./wake.ts";
-import { applyIdentity } from "./identity.ts";
 import { normalizeSchema, resolveToolNames, toTextContent } from "./tools.ts";
 
 type Deps = {
+  // Base environment for spawned channel servers (test seam). Production
+  // leaves it unset: the manager reads process.env at spawn time. Nothing in
+  // this extension ever writes to it — see identity.ts for why.
   env?: NodeJS.ProcessEnv;
   loadConfig?: (cwd: string) => Record<string, ChannelServerDef>;
   onBeforeSpawn?: () => void;
@@ -18,13 +20,13 @@ type Deps = {
 };
 
 export function createExtension(pi: any, deps: Deps = {}): void {
-  const env = deps.env ?? process.env;
   const loadConfig = deps.loadConfig ?? ((cwd: string) => loadChannelConfig({ home: homedir(), cwd }));
 
   const manager = new ConnectionManager({
     onEvent: (event) => wake.onEvent(event),
     onStatus: (status) => uiSetStatus(status),
     log: (message) => log(message),
+    ...(deps.env !== undefined ? { env: deps.env } : {}),
     // A channel that connects via retry — 30s+ after session_start already
     // ran registerTools() once — is otherwise never brought back into the
     // tool lifecycle: its instructions get injected and its events wake the
@@ -204,15 +206,18 @@ export function createExtension(pi: any, deps: Deps = {}): void {
     // an unhandled error would silently swallow every channel event for the
     // rest of the session's lifetime.
     try {
-      // Ordering is load-bearing: servers may read AGENT_SESSION_ID at
-      // their own startup to scope what they attach to. Set it late and
-      // such a channel comes up blind while the connection still looks
-      // healthy.
-      applyIdentity(ctx.sessionManager?.getSessionId?.(), env);
+      // THIS INSTANCE'S id, captured here and handed to the manager, which
+      // passes it to every server it spawns for this generation — retries
+      // included. It is never written to process.env: pi-subagents runs child
+      // sessions in this same process, and a child instance's session_start
+      // used to overwrite the parent's value for every later spawn and bash
+      // command. Resolved before the first spawn because servers read
+      // AGENT_SESSION_ID at their own startup to scope what they attach to.
+      const sessionId: string | undefined = ctx.sessionManager?.getSessionId?.();
       deps.onBeforeSpawn?.();
 
       const defs = loadConfig(ctx.cwd ?? process.cwd());
-      await manager.connectAll(defs);
+      await manager.connectAll(defs, sessionId);
       // manager.connections(), NOT the array connectAll returned: a retry that
       // reconnected while a sibling was still handshaking has already
       // registered its tools via onConnected, and connectAll's array cannot
