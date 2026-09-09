@@ -12,6 +12,9 @@
 //                           `muster channel` — only SIGKILL ends the process;
 //                           also reports "PID:<n>" to stderr so a test can
 //                           verify the OS process actually dies
+//   FAKE_ECHO_IDENTITY=1  → tools/call answers "identity:<AGENT_SESSION_ID>"
+//                            ("identity:unset" when absent), so a test can see
+//                            which session id the server was spawned with
 if (process.env.FAKE_IGNORE_SIGTERM) {
   process.on("SIGTERM", () => {});
   process.stderr.write(`PID:${process.pid}\n`);
@@ -76,7 +79,10 @@ function handle(msg: Record<string, unknown>): void {
       });
       return;
     }
-    send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "fake ok" }] } });
+    const text = process.env.FAKE_ECHO_IDENTITY
+      ? `identity:${process.env.AGENT_SESSION_ID ?? "unset"}`
+      : "fake ok";
+    send({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text }] } });
     return;
   }
   if (typeof msg.id === "number") {

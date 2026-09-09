@@ -1,12 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { mkdtempSync, rmSync } from "node:fs";
 import { ConnectionManager } from "./connection.ts";
 import type { ChannelEvent } from "./envelope.ts";
 
 const FAKE = join(import.meta.dirname, "..", "test", "fake-channel-server.ts");
+const FLAKY = join(import.meta.dirname, "..", "test", "flaky-channel-server.ts");
 
-function manager(overrides: { retryBaseMs?: number; retryMaxMs?: number } = {}) {
+async function identityOf(conn: { client: { request(m: string, p: unknown): Promise<unknown> } }): Promise<string> {
+  const result = (await conn.client.request("tools/call", { name: "fake_status", arguments: {} })) as {
+    content: Array<{ text: string }>;
+  };
+  return result.content[0].text;
+}
+
+function manager(overrides: { retryBaseMs?: number; retryMaxMs?: number; env?: NodeJS.ProcessEnv } = {}) {
   const events: ChannelEvent[] = [];
   const statuses: string[] = [];
   const logs: string[] = [];
@@ -295,5 +305,77 @@ test("two concurrent connectAll calls do not interleave — the second supersede
   assert.equal(conns.length, 1, `expected exactly one live connection, got: ${conns.map((c) => c.name).join(", ")}`);
   assert.equal(conns[0].name, "b");
 
+  await mgr.closeAll();
+});
+
+test("a server is spawned with the session id passed to connectAll", async () => {
+  const { mgr } = manager({ env: { ...process.env } });
+  const conns = await mgr.connectAll(
+    { fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } },
+    "sess-1",
+  );
+  assert.equal(conns.length, 1);
+  assert.equal(await identityOf(conns[0]), "identity:sess-1");
+  await mgr.closeAll();
+});
+
+test("with no session id, a stale AGENT_SESSION_ID in the base env is stripped, not inherited", async () => {
+  const { mgr } = manager({ env: { ...process.env, AGENT_SESSION_ID: "stale-outer" } });
+  const conns = await mgr.connectAll({
+    fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } },
+  });
+  assert.equal(await identityOf(conns[0]), "identity:unset");
+  await mgr.closeAll();
+});
+
+test("a server definition's env overrides the injected session id", async () => {
+  const { mgr } = manager({ env: { ...process.env } });
+  const conns = await mgr.connectAll(
+    { fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1", AGENT_SESSION_ID: "pinned" } } },
+    "sess-1",
+  );
+  assert.equal(await identityOf(conns[0]), "identity:pinned");
+  await mgr.closeAll();
+});
+
+test("connectAll never writes the base environment", async () => {
+  const base: NodeJS.ProcessEnv = { ...process.env };
+  delete base.AGENT_SESSION_ID;
+  const { mgr } = manager({ env: base });
+  await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE] } }, "sess-1");
+  assert.equal(base.AGENT_SESSION_ID, undefined, "the manager must not stamp identity into the environment it was given");
+  await mgr.closeAll();
+});
+
+test("a retry respawns with the id captured for its generation, even if the base env changed meanwhile", async () => {
+  const base: NodeJS.ProcessEnv = { ...process.env };
+  const { mgr } = manager({ env: base, retryBaseMs: 50, retryMaxMs: 50 });
+  const dir = mkdtempSync(join(tmpdir(), "pi-channels-identity-retry-"));
+  const counterFile = join(dir, "count.txt");
+  try {
+    const first = await mgr.connectAll(
+      { fake: { command: process.execPath, args: [FLAKY], env: { FLAKY_COUNTER_FILE: counterFile, FAKE_ECHO_IDENTITY: "1" } } },
+      "sess-1",
+    );
+    assert.equal(first.length, 0, "the flaky server dies on its first attempt");
+    // The pollution shape: something else writes the shared environment
+    // after the first spawn. The retry must not read it.
+    base.AGENT_SESSION_ID = "polluted-by-a-child";
+    await new Promise((r) => setTimeout(r, 500));
+    const conns = mgr.connections();
+    assert.equal(conns.length, 1, "the retry must have reconnected");
+    assert.equal(await identityOf(conns[0]), "identity:sess-1");
+  } finally {
+    await mgr.closeAll();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("closeAll clears the session id, so a later connectAll without one spawns unowned", async () => {
+  const { mgr } = manager({ env: { ...process.env } });
+  await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } }, "sess-1");
+  await mgr.closeAll();
+  const conns = await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } });
+  assert.equal(await identityOf(conns[0]), "identity:unset");
   await mgr.closeAll();
 });

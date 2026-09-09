@@ -3,6 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { JsonRpcClient } from "./client.ts";
 import type { ChannelServerDef } from "./config.ts";
 import type { ChannelEvent } from "./envelope.ts";
+import { spawnEnv } from "./identity.ts";
 
 export const CHANNEL_CAPABILITY = "claude/channel";
 export const CHANNEL_NOTIFICATION = "notifications/claude/channel";
@@ -72,6 +73,10 @@ type ManagerOpts = {
   // onConnected above) without waiting out a real 30s backoff.
   retryBaseMs?: number;
   retryMaxMs?: number;
+  // Base environment for every spawned server. Production leaves it unset and
+  // reads process.env at spawn time; tests pass a plain object so they can
+  // prove nothing here writes it and that a retry ignores later changes to it.
+  env?: NodeJS.ProcessEnv;
 };
 
 export class ConnectionManager {
@@ -82,6 +87,12 @@ export class ConnectionManager {
   private pending = new Set<ChildProcess>();
   private retries = new Map<string, { attempts: number; timer?: NodeJS.Timeout }>();
   private defs: Record<string, ChannelServerDef> = {};
+
+  // The session every server of the current generation is spawned for. Set by
+  // connectAll, cleared by closeAll, and read by every spawn including retries
+  // — so a retry after something else changed the environment still names the
+  // session that configured it. Never read from process.env.
+  private sessionId: string | undefined;
 
   // Bumped by closeAll(). Every connectOne()/retry call captures the
   // generation it started with; if the generation has moved on by the time
@@ -129,8 +140,8 @@ export class ConnectionManager {
   // synchronously, before control ever returns to the caller, so that a
   // second connectAll() called back-to-back (no await in between) sees the
   // link this call just made rather than the pre-call queue tail.
-  connectAll(defs: Record<string, ChannelServerDef>): Promise<Connection[]> {
-    const run = this.queue.then(() => this.runConnectAll(defs));
+  connectAll(defs: Record<string, ChannelServerDef>, sessionId?: string): Promise<Connection[]> {
+    const run = this.queue.then(() => this.runConnectAll(defs, sessionId));
     this.queue = run.then(
       () => undefined,
       () => undefined,
@@ -138,9 +149,10 @@ export class ConnectionManager {
     return run;
   }
 
-  private async runConnectAll(defs: Record<string, ChannelServerDef>): Promise<Connection[]> {
+  private async runConnectAll(defs: Record<string, ChannelServerDef>, sessionId: string | undefined): Promise<Connection[]> {
     await this.closeAll();
     this.defs = defs;
+    this.sessionId = sessionId;
     const gen = this.generation;
     const results = await Promise.all(
       Object.entries(defs).map(([name, def]) => this.connectOne(name, def, gen)),
@@ -155,7 +167,7 @@ export class ConnectionManager {
     try {
       child = spawn(def.command, def.args ?? [], {
         stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env, ...(def.env ?? {}) },
+        env: spawnEnv(this.opts.env ?? process.env, this.sessionId, def.env),
         ...(def.cwd ? { cwd: def.cwd } : {}),
       });
     } catch (error) {
@@ -381,6 +393,7 @@ export class ConnectionManager {
     for (const child of this.pending) killChild(child);
     this.pending.clear();
     this.defs = {};
+    this.sessionId = undefined;
     this.opts.onStatus("");
   }
 }
