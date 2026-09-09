@@ -19,16 +19,13 @@ rendering returns in full — complete commands, full output, truncation
 warnings. Press it again to re-collapse. It's a live toggle over the whole
 transcript: work collapsed, expand when something looks off.
 
-## Display-only, by construction
+## What it owns, by construction
 
-The extension re-registers the built-in `bash` tool via pi's own
-`createBashToolDefinition` and overrides only the two render slots. Execution
-*is* the built-in tool:
+The extension re-registers the built-in `bash` tool via pi's own `createBashToolDefinition`. It is the one package on a rig that registers `bash`, and it owns three things about it:
 
-- the model receives the full, untruncated-by-us output;
-- permission systems, reviewers, and sandboxes that hook execution are
-  unaffected;
-- session logs store the full result.
+- **Rendering.** The two render slots above. Execution *is* the built-in tool: the model receives the full output, permission systems, reviewers, and sandboxes that hook execution are unaffected, and session logs store the full result.
+- **pi's shell settings.** The built-in is constructed with `shellCommandPrefix` and `shellPath` from your global settings, exactly as pi does. Project-level `.pi/settings.json` is not read for these two, because pi's project-trust decision is not visible to extensions and a shell prefix must never come from an untrusted repo.
+- **Session identity.** Every command's environment carries `AGENT_SESSION_ID`, set from pi's per-command `PI_SESSION_ID`. Tools that scope themselves to the session that ran them (muster, galley, tackle) read that neutral name. It is set per command from pi's live session, never from the extension's process environment, so an in-process subagent can never leave the parent's commands carrying a child's id.
 
 ## Install
 
