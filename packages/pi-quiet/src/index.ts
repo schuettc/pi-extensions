@@ -1,23 +1,32 @@
 /**
- * quiet-tools: collapse bash tool chatter to one line per call.
+ * pi-quiet: this rig's bash tool registration.
  *
- * Re-registers the built-in bash tool (execution untouched — it IS the
- * built-in, via createBashToolDefinition) and overrides only the two render
- * slots. Collapsed (the default): the call renders as a single truncated
- * `$ command` line and the result as a single muted summary line. Expanded
- * (ctrl+o / app.tools.expand): both slots defer to the built-in renderer,
- * so the full command, streamed output, truncation warnings, and duration
- * come back exactly as stock pi shows them.
+ * Re-registers the built-in bash tool via pi's own createBashToolDefinition
+ * and owns three things about it:
  *
- * Display-only by design: permission gating, auto-review, and the sandbox
- * all hook execution, which this file never touches.
+ *  1. Rendering. Collapsed (the default): the call renders as a single
+ *     truncated `$ command` line and the result as a single muted summary
+ *     line. Expanded (ctrl+o / app.tools.expand): both slots defer to the
+ *     built-in renderer, so the full command, streamed output, truncation
+ *     warnings, and duration come back exactly as stock pi shows them.
+ *  2. pi's shell settings. The built-in is constructed with
+ *     settings.shellCommandPrefix and settings.shellPath, as pi itself does;
+ *     a re-registration that passed nothing silently dropped both.
+ *  3. Session identity. A spawn hook copies pi's per-command PI_SESSION_ID
+ *     into AGENT_SESSION_ID, the harness-neutral name tools read — see
+ *     bash-options.ts for why that must be per command and never process.env.
+ *
+ * Execution is still the built-in: permission gating, auto-review, and the
+ * sandbox all hook execution, which this file never replaces.
  */
 
 import {
   createBashToolDefinition,
+  SettingsManager,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { buildBashOptions } from "./bash-options.ts";
 
 function firstLine(command: string): { line: string; more: number } {
   const lines = command.split("\n");
@@ -32,7 +41,13 @@ function resultText(result: { content?: { type: string; text?: string }[] }): st
 }
 
 export default function quietTools(pi: ExtensionAPI) {
-  const builtin = createBashToolDefinition(process.cwd());
+  const cwd = process.cwd();
+  // Global settings only. pi decides project-settings trust itself and does
+  // not expose that decision to extensions; honouring an untrusted repo's
+  // .pi/settings.json here would let it prepend a shell prefix to every
+  // command, so this reads what pi reads for a project it has not trusted.
+  const settings = SettingsManager.create(cwd, undefined, { projectTrusted: false });
+  const builtin = createBashToolDefinition(cwd, buildBashOptions(settings));
 
   pi.registerTool({
     ...builtin,
