@@ -310,41 +310,53 @@ test("two concurrent connectAll calls do not interleave — the second supersede
 
 test("a server is spawned with the session id passed to connectAll", async () => {
   const { mgr } = manager({ env: { ...process.env } });
-  const conns = await mgr.connectAll(
-    { fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } },
-    "sess-1",
-  );
-  assert.equal(conns.length, 1);
-  assert.equal(await identityOf(conns[0]), "identity:sess-1");
-  await mgr.closeAll();
+  try {
+    const conns = await mgr.connectAll(
+      { fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } },
+      "sess-1",
+    );
+    assert.equal(conns.length, 1);
+    assert.equal(await identityOf(conns[0]), "identity:sess-1");
+  } finally {
+    await mgr.closeAll();
+  }
 });
 
 test("with no session id, a stale AGENT_SESSION_ID in the base env is stripped, not inherited", async () => {
   const { mgr } = manager({ env: { ...process.env, AGENT_SESSION_ID: "stale-outer" } });
-  const conns = await mgr.connectAll({
-    fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } },
-  });
-  assert.equal(await identityOf(conns[0]), "identity:unset");
-  await mgr.closeAll();
+  try {
+    const conns = await mgr.connectAll({
+      fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } },
+    });
+    assert.equal(await identityOf(conns[0]), "identity:unset");
+  } finally {
+    await mgr.closeAll();
+  }
 });
 
 test("a server definition's env overrides the injected session id", async () => {
   const { mgr } = manager({ env: { ...process.env } });
-  const conns = await mgr.connectAll(
-    { fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1", AGENT_SESSION_ID: "pinned" } } },
-    "sess-1",
-  );
-  assert.equal(await identityOf(conns[0]), "identity:pinned");
-  await mgr.closeAll();
+  try {
+    const conns = await mgr.connectAll(
+      { fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1", AGENT_SESSION_ID: "pinned" } } },
+      "sess-1",
+    );
+    assert.equal(await identityOf(conns[0]), "identity:pinned");
+  } finally {
+    await mgr.closeAll();
+  }
 });
 
 test("connectAll never writes the base environment", async () => {
   const base: NodeJS.ProcessEnv = { ...process.env };
   delete base.AGENT_SESSION_ID;
   const { mgr } = manager({ env: base });
-  await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE] } }, "sess-1");
-  assert.equal(base.AGENT_SESSION_ID, undefined, "the manager must not stamp identity into the environment it was given");
-  await mgr.closeAll();
+  try {
+    await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE] } }, "sess-1");
+    assert.equal(base.AGENT_SESSION_ID, undefined, "the manager must not stamp identity into the environment it was given");
+  } finally {
+    await mgr.closeAll();
+  }
 });
 
 test("a retry respawns with the id captured for its generation, even if the base env changed meanwhile", async () => {
@@ -373,9 +385,12 @@ test("a retry respawns with the id captured for its generation, even if the base
 
 test("closeAll clears the session id, so a later connectAll without one spawns unowned", async () => {
   const { mgr } = manager({ env: { ...process.env } });
-  await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } }, "sess-1");
-  await mgr.closeAll();
-  const conns = await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } });
-  assert.equal(await identityOf(conns[0]), "identity:unset");
-  await mgr.closeAll();
+  try {
+    await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } }, "sess-1");
+    await mgr.closeAll();
+    const conns = await mgr.connectAll({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } });
+    assert.equal(await identityOf(conns[0]), "identity:unset");
+  } finally {
+    await mgr.closeAll();
+  }
 });
