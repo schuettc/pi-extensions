@@ -45,8 +45,7 @@ speak this protocol.
   interrupted.
 - Each server's tools are registered under their own names, so instructions a
   server hands the agent stay literally true.
-- `AGENT_SESSION_ID` is exported before any server spawns; servers can read
-  it at startup to scope themselves to this session.
+- `AGENT_SESSION_ID` is passed into each server's environment at spawn, and never written to the host process's environment; a server reads it at startup to scope itself to the session that spawned it. A retry respawn carries the same id.
 - A server that crashes is retried with backoff; its tools re-register on
   reconnect. A misbehaving or non-conforming process is killed and logged.
 
