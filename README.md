@@ -7,7 +7,7 @@ own `.tools` domain (like galley/muster/hail); Channels lives at
 
 | Package | Status | What it does |
 |---|---|---|
-| [`pi-quiet`](packages/pi-quiet) | ready | Collapses each bash call to one line in the TUI; `ctrl+o` restores full built-in rendering. Display-only. |
+| [`pi-quiet`](packages/pi-quiet) | ready | Calm one-line bash rendering (`ctrl+o` restores full built-in rendering), pi's shell settings honoured, `AGENT_SESSION_ID` stamped on every command from `PI_SESSION_ID`. Execution stays pi's built-in. |
 | [`channels.tools`](packages/channels.tools) ([channels.tools](https://channels.tools)) | ready | Connect channel servers that push events into a live pi session — wake when idle, queue when busy — and proxy their tools. Client for the `claude/channel` convention, with a dependency-free reference server. |
 
 ## Publishing standard

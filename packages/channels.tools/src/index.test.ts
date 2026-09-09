@@ -12,7 +12,7 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 
 type ToolDef = { name: string; execute(id: string, params: unknown): Promise<unknown> };
 
-function fakePi() {
+function fakePi(sessionId = "session-xyz") {
   const handlers = new Map<string, Handler[]>();
   const sent: Array<{ msg: unknown; opts: unknown }> = [];
   const customs: Array<{ msg: unknown; opts: unknown }> = [];
@@ -39,7 +39,7 @@ function fakePi() {
     setActiveTools(_names: string[]) {},
   };
   const ctx = {
-    sessionManager: { getSessionId: () => "session-xyz" },
+    sessionManager: { getSessionId: () => sessionId },
     ui: { setStatus: (_k: string, v?: string) => { statuses.push(v ?? ""); } },
     hasUI: true,
     cwd: process.cwd(),
@@ -52,21 +52,59 @@ function fakePi() {
   return { pi, ctx, fire, sent, customs, registered, unregistered, tools, statuses };
 }
 
-test("session_start sets AGENT_SESSION_ID before any server is spawned", async () => {
+test("session_start never writes AGENT_SESSION_ID into the host environment", async () => {
   const { pi, fire } = fakePi();
-  const spawnOrder: string[] = [];
-  const env: NodeJS.ProcessEnv = {};
+  const host: NodeJS.ProcessEnv = { ...process.env, AGENT_SESSION_ID: "outer-agent" };
   createExtension(pi as never, {
-    env,
+    env: host,
     loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE] } }),
-    onBeforeSpawn: () => { spawnOrder.push(`env=${env.AGENT_SESSION_ID ?? "unset"}`); },
   });
   await fire("session_start", { reason: "startup" });
-  assert.deepEqual(spawnOrder, ["env=session-xyz"],
-    "identity must be set before spawn: galley channel reads it at its own startup");
+  assert.equal(host.AGENT_SESSION_ID, "outer-agent", "the host environment is read at spawn, never written");
   // session_start's connectAll() spawns and fully handshakes the fake server;
   // leaving it open here leaks the child process and hangs node --test.
   await fire("session_shutdown");
+});
+
+test("a server spawned at session_start is handed this session's id", async () => {
+  const { pi, fire, tools } = fakePi("session-xyz");
+  createExtension(pi as never, {
+    env: { ...process.env },
+    loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } }),
+  });
+  await fire("session_start", { reason: "startup" });
+  await new Promise((r) => setTimeout(r, 300));
+  const tool = tools.get("fake_status");
+  assert.ok(tool, "fake_status must be registered");
+  const result = (await tool!.execute("call-1", {})) as { content: Array<{ text: string }> };
+  assert.deepEqual(result.content, [{ type: "text", text: "identity:session-xyz" }]);
+  await fire("session_shutdown");
+});
+
+test("two extension instances in one process each hand out only their own id (the in-process subagent shape)", async () => {
+  // pi-subagents loads a fresh instance of every extension for a child
+  // session inside the parent's process. Both instances share process.env;
+  // neither may learn the other's id through it.
+  const shared: NodeJS.ProcessEnv = { ...process.env };
+  delete shared.AGENT_SESSION_ID;
+  const parent = fakePi("parent-session");
+  const child = fakePi("child-session");
+  const defs = () => ({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_ECHO_IDENTITY: "1" } } });
+  createExtension(parent.pi as never, { env: shared, loadConfig: defs });
+  createExtension(child.pi as never, { env: shared, loadConfig: defs });
+  await parent.fire("session_start", { reason: "startup" });
+  await child.fire("session_start", { reason: "startup" });
+  await new Promise((r) => setTimeout(r, 300));
+  const parentTool = parent.tools.get("fake_status");
+  const childTool = child.tools.get("fake_status");
+  assert.ok(parentTool && childTool);
+  const p = (await parentTool!.execute("c", {})) as { content: Array<{ text: string }> };
+  const c = (await childTool!.execute("c", {})) as { content: Array<{ text: string }> };
+  assert.equal(p.content[0].text, "identity:parent-session");
+  assert.equal(c.content[0].text, "identity:child-session");
+  assert.equal(shared.AGENT_SESSION_ID, undefined, "the shared environment stays clean");
+  await parent.fire("session_shutdown");
+  await child.fire("session_shutdown");
 });
 
 test("an inbound event delivers a hidden envelope plus a visible summary line", async () => {

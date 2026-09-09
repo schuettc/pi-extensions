@@ -41,23 +41,14 @@ test("galley channel handshakes and lists galley_ack", { skip: !has("galley") },
   await mgr.closeAll();
 });
 
-test("galley channel sees AGENT_SESSION_ID when identity is applied first", {
-  skip: !has("galley"),
-  // todo, not a plain assertion: this is green only once the galley
-  // AGENT_SESSION_ID patch lands (same phase, separate plan). node:test still
-  // runs it and reports the outcome, so the cross-repo dependency stays
-  // executable without leaving the suite permanently red.
-  todo: "green once the galley AGENT_SESSION_ID patch lands",
-}, async () => {
+test("galley channel sees the session id it was spawned with", { skip: !has("galley") }, async () => {
   const { mgr, logs } = manager();
-  process.env.AGENT_SESSION_ID = "live-test-session";
-  await mgr.connectAll({ galley: { command: "galley", args: ["channel", "--scope", "."] } });
+  await mgr.connectAll({ galley: { command: "galley", args: ["channel", "--scope", "."] } }, "live-test-session");
   await new Promise((r) => setTimeout(r, 500));
   await mgr.closeAll();
-  delete process.env.AGENT_SESSION_ID;
+  // galley channel logs `session_id_present=true|false` on its first stderr
+  // line; the manager relays stderr into the log.
   const line = logs.find((l) => l.includes("session_id_present="));
-  // Requires the same-phase galley patch; until it lands galley reads only
-  // CLAUDE_CODE_SESSION_ID and this reports false.
   assert.ok(line, `expected galley's startup line in logs: ${logs.join(" | ")}`);
   assert.match(line, /session_id_present=true/);
 });
