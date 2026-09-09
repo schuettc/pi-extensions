@@ -12,7 +12,6 @@ type Deps = {
   // this extension ever writes to it — see identity.ts for why.
   env?: NodeJS.ProcessEnv;
   loadConfig?: (cwd: string) => Record<string, ChannelServerDef>;
-  onBeforeSpawn?: () => void;
   // Test seams only: override the ConnectionManager's retry backoff so tests
   // can exercise the retry path without waiting out the real 30s/5min timers.
   retryBaseMs?: number;
@@ -214,7 +213,6 @@ export function createExtension(pi: any, deps: Deps = {}): void {
       // command. Resolved before the first spawn because servers read
       // AGENT_SESSION_ID at their own startup to scope what they attach to.
       const sessionId: string | undefined = ctx.sessionManager?.getSessionId?.();
-      deps.onBeforeSpawn?.();
 
       const defs = loadConfig(ctx.cwd ?? process.cwd());
       await manager.connectAll(defs, sessionId);

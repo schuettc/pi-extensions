@@ -21,6 +21,7 @@
   ],
   "files": [
     "src",
+    "!src/*.test.ts",
     "examples",
     "README.md"
   ],
