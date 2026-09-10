@@ -109,8 +109,15 @@ export class Session {
       this.hasRegistered = true;
       return;
     }
-    // ok:false → version mismatch / refusal. Go inert. Task 9 renders the notice.
-    this.isActive = false;
+    // ok:false → version mismatch / refusal. Go inert and render the C6 notice
+    // exactly once (idempotent even if onRegisterReply is called again).
+    if (this.isActive) {
+      this.isActive = false;
+      this.deps.ui.notify(
+        "Your Mac's hail is newer than this pi extension. Run the installer to update pi-hail.",
+        "warning",
+      );
+    }
   }
 
   /** Forward a pi event verbatim, wrapped as { event }. */

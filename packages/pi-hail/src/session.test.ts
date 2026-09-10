@@ -154,6 +154,17 @@ test("a reconnect register reply replays events; a first-connect reply does not"
   assert.deepEqual(deps.send.calls[1][0], { event: { type: "message_start", id: "m9" } });
 });
 
+// Guards: a version mismatch is one plain sentence in pi and then silence — never a silent downstream failure (C6, spec §7).
+test("version_mismatch reply renders one notice and makes the session inert", () => {
+  const deps = fakeDeps(); const s = new Session(deps);
+  s.onRegisterReply({ ok: false, error: "version_mismatch: daemon 0.3.0 requires extension >= 0.1.0" });
+  assert.equal(deps.ui.notify.calls.length, 1);
+  assert.match(deps.ui.notify.lastArg[0], /update/i);
+  assert.equal(s.active(), false);
+  s.forwardEvent({ type: "turn_start" });          // must be a no-op now
+  assert.equal(deps.send.calls.length, 0);
+});
+
 // Guards: a presence frame updates the status line.
 test("onInbound presence sets the status text", () => {
   const deps = fakeDeps();
