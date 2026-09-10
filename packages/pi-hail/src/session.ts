@@ -4,9 +4,13 @@
 // state machine, presence, replay, and authorizer land in later tasks — the
 // state fields below are declared now so those tasks only ADD, not rewrite.
 
+import type { PromptPermissionDetails } from "@gotgenes/pi-permission-system";
 import type { Phone, RegisterArgs, RegisterReply } from "./protocol.ts";
 import { presenceToStatus } from "./status.ts";
 import { EXTENSION_VERSION } from "./version.ts";
+
+/** A phone-originated permission verdict. `defer` yields to pi's own prompt. */
+export type PhoneDecision = "allow" | "deny" | "defer";
 
 /** Which side owns the current turn. `idle` at rest. */
 export type Phase = "idle" | "local_turn" | "phone_turn";
@@ -51,6 +55,15 @@ export class Session {
   private heldInput: string[] = [];
   /** Last-seen presence, for status-line idempotence. */
   private lastPresence: PresenceState = "offline";
+
+  /**
+   * Permission gates the phone is being asked to answer, keyed by requestId.
+   * Each resolver is fulfilled by an inbound { answer } (or resolved "defer" by
+   * the authorizer's timeout, which then discards its own entry). Resolvers only
+   * ever resolve — never reject — so a decision left dangling at session end
+   * cannot surface as an unhandled rejection.
+   */
+  private pendingDecisions = new Map<string, (v: PhoneDecision) => void>();
 
   /** Daemon's last-seen device sequence number, from the register reply. */
   private have: number | undefined = undefined;
@@ -182,13 +195,38 @@ export class Session {
       return;
     }
     if ("answer" in m) {
-      // Task 8
+      const answer = m.answer as { requestId: string; value: unknown };
+      const resolve = this.pendingDecisions.get(answer.requestId);
+      if (resolve) {
+        this.pendingDecisions.delete(answer.requestId);
+        // Map the phone's value to a verdict; anything unknown is a safe defer.
+        const value = answer.value;
+        resolve(value === "allow" ? "allow" : value === "deny" ? "deny" : "defer");
+      }
       return;
     }
     if ("ctl" in m) {
       // Task 5/later
       return;
     }
+  }
+
+  /**
+   * A permission gate hit during a phone-driven turn. Outside a phone turn (or
+   * when inert) resolve "defer" immediately so pi's normal prompt / pi-auto-review
+   * decide. Otherwise announce the gate to the phone and hold the decision open,
+   * keyed by requestId, until an inbound { answer } resolves it. Never throws.
+   */
+  requestPhoneDecision(details: PromptPermissionDetails): Promise<PhoneDecision> {
+    if (!this.isActive || this.phase !== "phone_turn") {
+      return Promise.resolve("defer");
+    }
+    const requestId = details.requestId;
+    // Announce the ask to the phone as an event frame so it can render + answer.
+    this.deps.send({ event: { type: "permission_prompt", requestId, details } });
+    return new Promise<PhoneDecision>((resolve) => {
+      this.pendingDecisions.set(requestId, resolve);
+    });
   }
 
   /** false after a version-mismatch refusal → inert. */
