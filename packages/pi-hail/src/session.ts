@@ -88,15 +88,50 @@ export class Session {
     this.deps.send({ event: piEvent });
   }
 
-  /** Turn boundary the phone needs to gate its composer. Lock/attribution: Task 5. */
+  /**
+   * Turn boundary the phone needs to gate its composer. Attributes the turn to
+   * the phone (locking local input) when a phone prompt was just injected.
+   */
   turnStart(): void {
     if (!this.isActive) return;
+    if (this.pendingPhonePrompt) {
+      this.phase = "phone_turn";
+      this.pendingPhonePrompt = false;
+      this.deps.send({ lock: "held" });
+    } else {
+      this.phase = "local_turn";
+    }
     this.deps.send({ turn: "start" });
   }
 
   turnEnd(): void {
     if (!this.isActive) return;
+    const wasPhoneTurn = this.phase === "phone_turn";
     this.deps.send({ turn: "end" });
+    if (wasPhoneTurn) {
+      this.deps.send({ lock: "released" });
+      this.deps.ui.holdInput(false);
+      // Re-submit any local input captured during the phone turn, in order.
+      const held = this.heldInput;
+      this.heldInput = [];
+      for (const text of held) {
+        this.deps.sendUserMessage(text);
+      }
+    }
+    this.phase = "idle";
+  }
+
+  /**
+   * Local interactive input. Returns false when the input was held behind the
+   * phone-turn notice (to be replayed on turn end), true when it passed through.
+   */
+  submitLocalInput(text: string): boolean {
+    if (this.phase === "phone_turn") {
+      this.heldInput.push(text);
+      this.deps.ui.holdInput(true);
+      return false;
+    }
+    return true;
   }
 
   /** A clean pi exit tells the phone the session is gone. */
@@ -111,7 +146,16 @@ export class Session {
     const m = msg as Record<string, unknown>;
     if (m == null || typeof m !== "object") return;
     if ("prompt" in m) {
-      // Task 5
+      const prompt = m.prompt as { text: string; from: string; requestId: string };
+      if (this.phase === "local_turn") {
+        // The person owns the turn; refuse rather than drop or queue (spec §4).
+        this.deps.send({ refused: { requestId: prompt.requestId, reason: "turn_running" } });
+        return;
+      }
+      // Attribute the next turn_start to the phone, then inject the prompt as input.
+      this.pendingPhonePrompt = true;
+      this.phase = "phone_turn";
+      this.deps.sendUserMessage(prompt.text);
       return;
     }
     if ("presence" in m) {

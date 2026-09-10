@@ -95,3 +95,39 @@ test("exit emits { exit:{code} }", () => {
   s.exit(0);
   assert.deepEqual(lastSend(deps), { exit: { code: 0 } });
 });
+
+// Guards: a phone prompt during the person's own turn is refused with a reason, never silently dropped or queued (spec §4).
+test("prompt during local_turn is refused with reason turn_running", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.turnStart(); // local turn (no pending phone prompt)
+  s.onInbound({ prompt: { text: "hi", from: "p1", requestId: "r1" } });
+  assert.deepEqual(lastSend(deps), { refused: { requestId: "r1", reason: "turn_running" } });
+  assert.equal(deps.sendUserMessage.calls.length, 0);
+});
+
+// Guards: while the phone drives, local typing is held with a visible notice and replayed after — not dropped (spec §4).
+test("local input during phone_turn is held, then re-submitted on turn end", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onInbound({ prompt: { text: "do it", from: "p1", requestId: "r2" } }); // starts phone turn
+  s.turnStart();
+  assert.equal(s.submitLocalInput("my local note"), false); // held
+  assert.equal(deps.ui.holdInput.lastArg[0], true);
+  s.turnEnd();
+  assert.equal(deps.ui.holdInput.lastArg[0], false);
+  assert.equal(deps.sendUserMessage.calls.at(-1)?.[0], "my local note"); // replayed
+});
+
+// Guards: a { lock } frame brackets a phone-driven turn so the daemon can mirror "Mac is working" to other phones.
+test("phone turn emits lock held on start and released on end", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onInbound({ prompt: { text: "do it", from: "p1", requestId: "r3" } }); // starts phone turn
+  s.turnStart();
+  assert.deepEqual(deps.send.calls[0][0], { lock: "held" });
+  assert.deepEqual(deps.send.calls[1][0], { turn: "start" });
+  s.turnEnd();
+  assert.deepEqual(deps.send.calls[2][0], { turn: "end" });
+  assert.deepEqual(deps.send.calls[3][0], { lock: "released" });
+});
