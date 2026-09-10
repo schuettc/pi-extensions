@@ -43,6 +43,26 @@ export function deliveryMode(idle: boolean): DeliveryMode {
   return idle ? "steer" : "followUp";
 }
 
+// Keystroke rule for the auto-space editor nicety. `data` is one editor
+// input event: a single typed character for real keystrokes, multi-char for
+// pastes and escape sequences — only the exact single "!" participates, so
+// pasting a script containing ! is never rewritten.
+//
+// - "!" into an EMPTY editor -> "! " (autospace): the space marks bash mode
+//   visibly and keeps the command readable.
+// - "!" when the editor holds exactly "! " -> "!! " (upgrade): the second
+//   bang would otherwise land after the auto-space and break pi's `!!`
+//   detection, which requires the bangs adjacent at position 0.
+// - anything else -> pass to the editor untouched. A "!" mid-sentence is
+//   never touched because the editor is not empty.
+export type KeyAction = "autospace" | "upgrade" | "pass";
+export function bangKeyAction(data: string, currentText: string): KeyAction {
+  if (data !== "!") return "pass";
+  if (currentText === "") return "autospace";
+  if (currentText === "! ") return "upgrade";
+  return "pass";
+}
+
 // /bang command argument parsing. Anything unrecognized reads as a status
 // request rather than an error — a toggle command should never scold.
 export type ToggleAction = "on" | "off" | "status";

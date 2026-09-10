@@ -19,27 +19,34 @@
 // live in bang.ts; this file is the thin, best-effort pi wiring in the same
 // split pi-wakeup uses.
 
-import { deliveryMode, nudgeText, parseToggle, shouldNudge } from "./bang.ts";
+import { bangKeyAction, deliveryMode, nudgeText, parseToggle, shouldNudge } from "./bang.ts";
 
 type BashOps = { exec: (command: string, cwd: string, options: any) => Promise<{ exitCode: number | null }> };
 
 export type Deps = {
-  // Injectable so the wiring is testable without pi's real shell backend or
-  // real time passing.
+  // Injectable so the wiring is testable without pi's real shell backend,
+  // real editor base class, or real time passing.
   createOps?: () => Promise<BashOps> | BashOps;
   setTimer?: (fn: () => void, ms: number) => unknown;
+  loadEditorBase?: () => Promise<any>;
 };
 
 // Lazy: a top-level import of the pi package pulls its entire runtime, which
 // only resolves inside a live pi process (and breaks node --test). The real
-// backend is loaded on the first `!` command instead.
+// backend and editor base are loaded on first use instead.
 async function defaultCreateOps(): Promise<BashOps> {
   const mod: any = await import("@earendil-works/pi-coding-agent");
   return mod.createLocalBashOperations();
 }
 
+async function defaultLoadEditorBase(): Promise<any> {
+  const mod: any = await import("@earendil-works/pi-coding-agent");
+  return mod.CustomEditor;
+}
+
 export function createBang(pi: any, deps: Deps = {}): void {
   const createOps = deps.createOps ?? defaultCreateOps;
+  const loadEditorBase = deps.loadEditorBase ?? defaultLoadEditorBase;
   const setTimer = deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
 
   let enabled = true;
@@ -83,8 +90,50 @@ export function createBang(pi: any, deps: Deps = {}): void {
     }
   }
 
-  pi.on("session_start", (_event: unknown, sessionCtx: any) => {
+  // Auto-space editor nicety: typing `!` into an empty editor expands to
+  // `! ` (bash mode announced, command kept readable); a second `!` upgrades
+  // to `!! ` so the hidden variant stays typeable. Pi's submit handler trims
+  // the command after the prefix, so the padded forms parse identically.
+  // Installed only when no other extension has replaced the editor — blindly
+  // overriding would silently drop e.g. a vim-mode editor's behavior.
+  async function installEditor(sessionCtx: any): Promise<void> {
+    try {
+      const ui = sessionCtx?.ui;
+      if (!ui || typeof ui.setEditorComponent !== "function") return;
+      if (typeof ui.getEditorComponent === "function" && ui.getEditorComponent() !== undefined) {
+        log("another extension owns the editor; auto-space disabled");
+        return;
+      }
+      const Base = (await loadEditorBase()) as new (
+        ...args: any[]
+      ) => { getText(): string; setText(text: string): void; handleInput(data: string): void };
+      class BangEditor extends Base {
+        handleInput(data: string): void {
+          const action = bangKeyAction(data, this.getText());
+          if (action === "autospace") {
+            super.handleInput(data);
+            super.handleInput(" ");
+            return;
+          }
+          if (action === "upgrade") {
+            this.setText("!! ");
+            return;
+          }
+          super.handleInput(data);
+        }
+      }
+      ui.setEditorComponent(
+        (tui: any, theme: any, keybindings: any) => new BangEditor(tui, theme, keybindings),
+      );
+    } catch (error) {
+      // The nudge behavior must survive an editor-install failure.
+      log(`auto-space editor not installed: ${String(error)}`);
+    }
+  }
+
+  pi.on("session_start", async (_event: unknown, sessionCtx: any) => {
     ctx = sessionCtx;
+    await installEditor(sessionCtx);
   });
 
   pi.on("user_bash", (event: any, eventCtx: any) => {

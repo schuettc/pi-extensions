@@ -32,13 +32,51 @@ function makeFixture(opts: { execExitCode?: number | null; execAborts?: boolean 
     },
   };
 
+  // Fake editor base standing in for pi's CustomEditor: plain text buffer,
+  // append-on-input, so the subclass's interception is observable.
+  class FakeEditorBase {
+    text = "";
+    constructor(..._args: any[]) {}
+    getText() {
+      return this.text;
+    }
+    setText(t: string) {
+      this.text = t;
+    }
+    handleInput(d: string) {
+      this.text += d;
+    }
+  }
+
   createBang(pi, {
     createOps: () => fakeOps,
     setTimer: (fn: () => void) => {
       timers.push(fn);
       return timers.length;
     },
+    loadEditorBase: async () => FakeEditorBase,
   });
+
+  async function startSession(ctx: any) {
+    await handlers.get("session_start")!({}, ctx);
+  }
+
+  // A fake ctx.ui that accepts an editor replacement, optionally pretending
+  // another extension already owns the editor.
+  function makeUi(existing?: unknown) {
+    let factory: any = existing;
+    return {
+      setEditorComponent(f: any) {
+        factory = f;
+      },
+      getEditorComponent() {
+        return factory;
+      },
+      makeEditor() {
+        return factory({}, {}, {});
+      },
+    };
+  }
 
   // ctx defaults to undefined so the wiring keeps the ctx captured at
   // session_start (a truthy fake here would overwrite it).
@@ -54,12 +92,12 @@ function makeFixture(opts: { execExitCode?: number | null; execAborts?: boolean 
     while (timers.length > 0) timers.shift()!();
   }
 
-  return { pi, handlers, commands, sent, timers, execCalls, runUserBash, flushTimers };
+  return { pi, handlers, commands, sent, timers, execCalls, runUserBash, flushTimers, startSession, makeUi };
 }
 
 test("successful ! run defers a nudge, then sends it with triggerTurn", async () => {
   const f = makeFixture({ execExitCode: 0 });
-  f.handlers.get("session_start")!({}, { isIdle: () => true });
+  await f.startSession({ isIdle: () => true });
   await f.runUserBash("git status", false);
 
   assert.equal(f.sent.length, 0, "nudge must not fire before the timer (entry-ordering)");
@@ -75,7 +113,7 @@ test("successful ! run defers a nudge, then sends it with triggerTurn", async ()
 
 test("busy session delivers as followUp", async () => {
   const f = makeFixture({ execExitCode: 0 });
-  f.handlers.get("session_start")!({}, { isIdle: () => false });
+  await f.startSession({ isIdle: () => false });
   await f.runUserBash("ls", false);
   f.flushTimers();
   assert.equal(f.sent[0]!.options.deliverAs, "followUp");
@@ -129,7 +167,7 @@ test("a throwing sendMessage is contained", async () => {
 
 test("stale ctx.isIdle throw falls back to followUp", async () => {
   const f = makeFixture({ execExitCode: 0 });
-  f.handlers.get("session_start")!({}, {
+  await f.startSession({
     isIdle: () => {
       throw new Error("assertActive: session replaced");
     },
@@ -137,4 +175,46 @@ test("stale ctx.isIdle throw falls back to followUp", async () => {
   await f.runUserBash("ls", false);
   f.flushTimers();
   assert.equal(f.sent[0]!.options.deliverAs, "followUp");
+});
+
+test("editor: typing ! then a command yields '! cmd', second ! upgrades to '!!'", async () => {
+  const f = makeFixture();
+  const ui = f.makeUi();
+  await f.startSession({ ui });
+
+  const ed = ui.makeEditor();
+  ed.handleInput("!");
+  assert.equal(ed.getText(), "! ", "auto-space after bang");
+  for (const ch of "ls") ed.handleInput(ch);
+  assert.equal(ed.getText(), "! ls");
+
+  const ed2 = ui.makeEditor();
+  ed2.handleInput("!");
+  ed2.handleInput("!");
+  assert.equal(ed2.getText(), "!! ", "second bang upgrades");
+  for (const ch of "ls") ed2.handleInput(ch);
+  assert.equal(ed2.getText(), "!! ls");
+});
+
+test("editor: ! mid-text is untouched", async () => {
+  const f = makeFixture();
+  const ui = f.makeUi();
+  await f.startSession({ ui });
+  const ed = ui.makeEditor();
+  for (const ch of "echo hi") ed.handleInput(ch);
+  ed.handleInput("!");
+  assert.equal(ed.getText(), "echo hi!");
+});
+
+test("editor: not installed when another extension owns the editor", async () => {
+  const f = makeFixture();
+  const theirs = () => ({ marker: "vim" });
+  const ui = f.makeUi(theirs);
+  await f.startSession({ ui });
+  assert.equal(ui.getEditorComponent(), theirs, "existing editor factory untouched");
+});
+
+test("editor: missing ui does not break session start", async () => {
+  const f = makeFixture();
+  await assert.doesNotReject(f.startSession({}));
 });
