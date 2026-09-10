@@ -1,0 +1,37 @@
+{
+  "name": "pi-bang",
+  "version": "0.1.0",
+  "description": "React to `!` shell commands: when a user-run bash command completes, trigger a model turn so the session responds to the output instead of waiting for the next prompt.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schuettc/pi-extensions.git",
+    "directory": "packages/pi-bang"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "bash",
+    "user_bash",
+    "shell"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "typescript": "^5.6.0"
+  }
+}
