@@ -113,9 +113,11 @@ async function loadRealGetPermissionsService(): Promise<
 }
 
 // The lifecycle events the phone renders. turn_start/turn_end are handled
-// separately (they also drive the Session's turn markers). We deliberately do
-// NOT forward before_provider_request / before_provider_headers — they may
-// carry secrets (security default).
+// separately: turn lifecycle is emitted ONLY via {turn:"start"|"end"} frames
+// (Session.turnStart/turnEnd), NEVER as a forwarded {event} carrying a pi turn
+// rpc — otherwise the daemon rotates and issues that session's turn key twice
+// per turn (C4). We deliberately do NOT forward before_provider_request /
+// before_provider_headers — they may carry secrets (security default).
 const FORWARDED_EVENTS = [
   "message_start",
   "message_update",
@@ -206,18 +208,19 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
     }),
   );
 
-  pi.on("turn_start", (event: unknown, ctx: unknown) =>
+  // Turn lifecycle is emitted ONLY as a {turn} frame (never also as a forwarded
+  // {event}); a duplicate {event} turn rpc would make the daemon rotate the
+  // session's turn key twice per turn (C4).
+  pi.on("turn_start", (_event: unknown, ctx: unknown) =>
     safe(() => {
       if (!ownsThisPane || !session || !ownsPane(ctx)) return;
-      session.forwardEvent(event);
       session.turnStart();
     }),
   );
 
-  pi.on("turn_end", (event: unknown, ctx: unknown) =>
+  pi.on("turn_end", (_event: unknown, ctx: unknown) =>
     safe(() => {
       if (!ownsThisPane || !session || !ownsPane(ctx)) return;
-      session.forwardEvent(event);
       session.turnEnd();
     }),
   );

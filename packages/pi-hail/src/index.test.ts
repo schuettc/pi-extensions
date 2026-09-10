@@ -114,6 +114,42 @@ test("tui session_start registers, and turn_start/turn_end forward through the s
   assert.ok(frames.some((f) => f.turn === "end"), "expected a { turn:'end' } frame");
 });
 
+// Guards: turn lifecycle is emitted ONLY as {turn} frames — never also as an {event} carrying a pi turn rpc, or the daemon rotates turn keys twice per turn (C4, bridge PR #140).
+test("turn lifecycle emits only {turn} frames, never a forwarded {event}", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fire("turn_start", { type: "turn_start" }, makeCtx());
+  fire("turn_end", { type: "turn_end" }, makeCtx());
+  const frames = fake.writes.slice(1).map((w) => JSON.parse(w));
+  const turnFrames = frames.filter((f) => f.turn !== undefined).map((f) => f.turn);
+  assert.deepEqual(
+    turnFrames,
+    ["start", "end"],
+    "turn lifecycle frames must be exactly { turn:'start' } then { turn:'end' }",
+  );
+  const leakedTurnEvent = frames.find((f) => {
+    if (f.event === undefined) return false;
+    const rpc = f.event as { type?: string; method?: string } | null;
+    return (
+      rpc?.type === "turn_start" ||
+      rpc?.type === "turn_end" ||
+      rpc?.method === "turn_start" ||
+      rpc?.method === "turn_end"
+    );
+  });
+  assert.equal(
+    leakedTurnEvent,
+    undefined,
+    "turn lifecycle must NEVER be forwarded as an {event} carrying a pi turn rpc (would rotate turn keys twice)",
+  );
+});
+
 // Guards: a phone prompt arriving on the socket is submitted to pi as typed input carrying its turn.
 test("inbound prompt calls pi.sendUserMessage", async () => {
   const { pi, fire, sendUserMessage } = makeFakePi();
