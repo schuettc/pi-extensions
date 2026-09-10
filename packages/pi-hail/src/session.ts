@@ -4,7 +4,8 @@
 // state machine, presence, replay, and authorizer land in later tasks — the
 // state fields below are declared now so those tasks only ADD, not rewrite.
 
-import type { RegisterArgs, RegisterReply } from "./protocol.ts";
+import type { Phone, RegisterArgs, RegisterReply } from "./protocol.ts";
+import { presenceToStatus } from "./status.ts";
 import { EXTENSION_VERSION } from "./version.ts";
 
 /** Which side owns the current turn. `idle` at rest. */
@@ -159,7 +160,8 @@ export class Session {
       return;
     }
     if ("presence" in m) {
-      // Task 6
+      const presence = m.presence as { phones: Phone[] };
+      this.deps.ui.setStatus(presenceToStatus(presence.phones));
       return;
     }
     if ("answer" in m) {

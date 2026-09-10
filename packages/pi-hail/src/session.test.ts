@@ -131,3 +131,11 @@ test("phone turn emits lock held on start and released on end", () => {
   assert.deepEqual(deps.send.calls[2][0], { turn: "end" });
   assert.deepEqual(deps.send.calls[3][0], { lock: "released" });
 });
+
+// Guards: a presence frame updates the status line.
+test("onInbound presence sets the status text", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onInbound({ presence: { phones: [{ deviceId: "p", name: "iPhone", state: "driving" }] } });
+  assert.equal(deps.ui.setStatus.lastArg[0], "phone is working");
+});
