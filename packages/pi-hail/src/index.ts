@@ -1,0 +1,311 @@
+// Extension entry (Task 10): wire pi's lifecycle to the pure Session controller
+// and the DaemonSocket. This module owns ONLY the pane it starts on
+// (ctx.mode === "tui") — subagent sessions and headless `pi -p` runs load this
+// extension too and must stay inert (the pi-tmux-bridge ownership gate). Every
+// handler is best-effort (`safe()`), so nothing thrown ever escapes into pi and
+// a missing/slow daemon never blocks a turn.
+
+import { basename, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { existsSync, readFileSync } from "node:fs";
+import type { PermissionsService } from "@gotgenes/pi-permission-system";
+import { DaemonSocket, realConnect, type Connect } from "./socket.ts";
+import { Session, type RegisterInput, type SessionDeps } from "./session.ts";
+import { readSessionEvents } from "./replay.ts";
+import { createPhoneAuthorizer } from "./authorizer.ts";
+
+/** DI surface for tests: a fake socket, a fake permission service, an injected clock/timeout. */
+export interface ExtensionDeps {
+  connect?: Connect;
+  socketPath?: string;
+  getPermissionsService?: (sessionId: string) => PermissionsService | undefined;
+  now?: () => number;
+  timeoutMs?: number;
+}
+
+// Every handler is best-effort: it sits directly on a pi lifecycle event, and a
+// harness that fails a session start, a turn, or a shutdown is worse than no
+// harness at all. NOTHING here may escape into pi.
+function safe(fn: () => void | Promise<void>): void {
+  try {
+    const result = fn();
+    if (result && typeof (result as Promise<void>).catch === "function") {
+      (result as Promise<void>).catch(() => {});
+    }
+  } catch {
+    // Best-effort: swallow.
+  }
+}
+
+// The tmux window name is the daemon-spawn signal (family rule: the ONLY
+// process.env read allowed for identity, and it is not exported). A bare
+// terminal has no $TMUX and falls back to the project name. Guarded so a test
+// (or a machine without tmux) never has this throw or hang.
+function tmuxWindowName(): string | undefined {
+  if (!process.env.TMUX) return undefined;
+  try {
+    const out = execFileSync("tmux", ["display-message", "-p", "#{window_name}"], {
+      encoding: "utf8",
+      timeout: 1000,
+    }).trim();
+    return out.length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Resolve the loaded pi build's version for the C6 handshake. The package.json
+// of an ESM-only package is not exposed through its `exports`, so resolve the
+// package's node_modules dir directly and read its manifest. Rails names the
+// package `@mariozechner/pi-coding-agent`; this monorepo installs
+// `@earendil-works/pi-coding-agent` — try whichever is present, then fall back
+// to `pi --version` once, then "unknown". Never hardcoded.
+function resolvePiVersion(): string {
+  const require = createRequire(import.meta.url);
+  for (const name of ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"]) {
+    try {
+      const dirs = require.resolve.paths(name) ?? [];
+      for (const d of dirs) {
+        const p = join(d, name, "package.json");
+        if (!existsSync(p)) continue;
+        const pkg = JSON.parse(readFileSync(p, "utf8"));
+        if (pkg?.name === name && pkg?.version) return String(pkg.version);
+      }
+    } catch {
+      // try the next name
+    }
+  }
+  try {
+    const out = execFileSync("pi", ["--version"], { encoding: "utf8", timeout: 1000 }).trim();
+    if (out.length > 0) return out;
+  } catch {
+    // fall through
+  }
+  return "unknown";
+}
+
+// Only an interactive session owns the pane's identity: the TUI upgrades the
+// extension mode to "tui" before extensions initialize, so a real session sees
+// "tui" from session_start on. Subagents (in-process) and headless `pi -p`
+// stay at the SDK default and are guests, not owners.
+const ownsPane = (ctx: unknown): boolean => (ctx as { mode?: string } | null)?.mode === "tui";
+
+// The real `getPermissionsService` lives in an ESM-only package whose runtime
+// entry is a `.ts` file. Statically importing that VALUE would make node's
+// test runner strip-and-load node_modules TS (which it refuses). Load it lazily
+// and only when no service factory was injected — so tests, which always inject
+// one, never touch node_modules at all. Under pi the package is already loaded.
+let realGetPermissionsServiceCache: ((sessionId: string) => PermissionsService | undefined) | null =
+  null;
+async function loadRealGetPermissionsService(): Promise<
+  (sessionId: string) => PermissionsService | undefined
+> {
+  if (realGetPermissionsServiceCache) return realGetPermissionsServiceCache;
+  const mod = await import("@gotgenes/pi-permission-system");
+  realGetPermissionsServiceCache = mod.getPermissionsService;
+  return realGetPermissionsServiceCache;
+}
+
+// The lifecycle events the phone renders. turn_start/turn_end are handled
+// separately (they also drive the Session's turn markers). We deliberately do
+// NOT forward before_provider_request / before_provider_headers — they may
+// carry secrets (security default).
+const FORWARDED_EVENTS = [
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+] as const;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
+  const connect = deps.connect ?? realConnect;
+  const socketPath = deps.socketPath;
+  const timeoutMs = deps.timeoutMs ?? 30000;
+
+  // Ownership is captured at the one session_start that owns the pane; a
+  // subagent node's stays false, so its events and bus registrations are inert.
+  let ownsThisPane = false;
+  let session: Session | undefined;
+  let socket: DaemonSocket | undefined;
+  let registerInput: RegisterInput | undefined;
+  // The input handler reads this flag; the Session sets it via ui.holdInput
+  // while a phone turn runs, so local terminal input is held (not dropped).
+  let heldFlag = false;
+  let authorizerDispose: (() => void) | undefined;
+  let warnedNoPerms = false;
+
+  // Register (and, on a reconnect, replay). Both the first call and every
+  // reconnect must swallow a rejected promise: a dead daemon rejects, and pi
+  // must still start / keep running with no unhandled rejection.
+  const register = (): void => {
+    if (!socket || !session || !registerInput) return;
+    socket
+      .register(session.buildRegisterArgs(registerInput))
+      .then((reply) => safe(() => session?.onRegisterReply(reply)))
+      .catch(() => {});
+  };
+
+  pi.on("session_start", (_event: unknown, ctx: unknown) =>
+    safe(() => {
+      if (!ownsPane(ctx)) return;
+      if (ownsThisPane) return; // capture identity from the first owning start only
+      ownsThisPane = true;
+
+      const c = ctx as {
+        cwd: string;
+        sessionManager: { getSessionId: () => unknown; getSessionFile?: () => string | undefined };
+        ui: {
+          setStatus: (key: string, text: string | undefined) => void;
+          notify: (msg: string, level: "info" | "warning" | "error") => void;
+        };
+      };
+
+      const sessionId = String(c.sessionManager.getSessionId());
+      const dir = c.cwd;
+      const project = basename(dir);
+      const work = tmuxWindowName() ?? basename(dir);
+      const piVersion = resolvePiVersion();
+      registerInput = { sessionId, project, work, dir, piVersion };
+
+      const sessionDeps: SessionDeps = {
+        send: (obj) => socket?.send(obj),
+        sendUserMessage: (text) => pi.sendUserMessage(text),
+        ui: {
+          setStatus: (text) => c.ui.setStatus("pi-hail", text),
+          notify: (msg, level) => c.ui.notify(msg, level ?? "info"),
+          holdInput: (held) => {
+            heldFlag = held;
+          },
+        },
+        readSessionEvents: (sinceSeq) => {
+          const file = c.sessionManager.getSessionFile?.();
+          return file ? readSessionEvents(file, sinceSeq) : [];
+        },
+      };
+
+      session = new Session(sessionDeps);
+      socket = new DaemonSocket({
+        connect,
+        path: socketPath,
+        onLine: (msg) => safe(() => session?.onInbound(msg)),
+        onDown: () => {},
+        // The session knows the register args + replay cursor; re-register on
+        // reconnect (which triggers replay after the daemon's `have` cursor).
+        onReconnect: () => register(),
+      });
+      register();
+    }),
+  );
+
+  pi.on("turn_start", (event: unknown, ctx: unknown) =>
+    safe(() => {
+      if (!ownsThisPane || !session || !ownsPane(ctx)) return;
+      session.forwardEvent(event);
+      session.turnStart();
+    }),
+  );
+
+  pi.on("turn_end", (event: unknown, ctx: unknown) =>
+    safe(() => {
+      if (!ownsThisPane || !session || !ownsPane(ctx)) return;
+      session.forwardEvent(event);
+      session.turnEnd();
+    }),
+  );
+
+  for (const name of FORWARDED_EVENTS) {
+    pi.on(name, (event: unknown, ctx: unknown) =>
+      safe(() => {
+        if (!ownsThisPane || !session || !ownsPane(ctx)) return;
+        session.forwardEvent(event);
+      }),
+    );
+  }
+
+  // input must RETURN a result, so it cannot use safe() (which returns void):
+  // hold interactive input behind the phone-turn notice, else let it continue.
+  pi.on("input", (event: unknown, _ctx: unknown) => {
+    try {
+      if (!ownsThisPane || !session) return { action: "continue" };
+      const e = event as { source?: string; text?: string } | null;
+      if (e?.source === "interactive" && heldFlag) {
+        session.submitLocalInput(e.text ?? "");
+        return { action: "handled" };
+      }
+    } catch {
+      // Never let an input handler throw into pi.
+    }
+    return { action: "continue" };
+  });
+
+  pi.on("session_shutdown", (event: unknown, ctx: unknown) =>
+    safe(() => {
+      if (!ownsThisPane || !ownsPane(ctx)) return;
+      // Fires on every session SWITCH, not only quit: reason ∈
+      // quit|reload|new|resume|fork. Only a REAL end (quit) emits exit + closes
+      // the socket; every other reason is a continuation whose paired
+      // session_start re-registers — do nothing (mirror pi-tmux-bridge).
+      const reason = (event as { reason?: string } | null)?.reason;
+      if (reason && reason !== "quit") return;
+      if (authorizerDispose) {
+        try {
+          authorizerDispose();
+        } catch {
+          // best-effort
+        }
+        authorizerDispose = undefined;
+      }
+      session?.exit(0);
+      socket?.close();
+    }),
+  );
+
+  // Permissions: register the phone-answering authorizer link on
+  // permissions:ready (robust to load order / survives /reload). Gated on
+  // ownership. If the permission system is unavailable (older pi), skip
+  // registration, log once, and continue — phone answers degrade gracefully.
+  pi.events?.on?.("permissions:ready", (data: unknown) =>
+    safe(async () => {
+      if (!ownsThisPane || !session) return;
+      const currentSession = session;
+      const sessionId = (data as { sessionId?: string | null } | null)?.sessionId;
+      if (!sessionId) return;
+      let service: PermissionsService | undefined;
+      try {
+        const getPermissionsService =
+          deps.getPermissionsService ?? (await loadRealGetPermissionsService());
+        service = getPermissionsService(sessionId);
+      } catch {
+        service = undefined;
+      }
+      if (!service) {
+        if (!warnedNoPerms) {
+          warnedNoPerms = true;
+          console.error(
+            "[pi-hail] permission system unavailable; phone cannot answer gates (answer on your Mac)",
+          );
+        }
+        return;
+      }
+      const authorizer = createPhoneAuthorizer({ session: currentSession, timeoutMs });
+      authorizerDispose = service.registerAuthorizer("pi-hail", authorizer.authorize);
+    }),
+  );
+
+  // Forward the prompt UI so the phone sees the gate it is being asked about.
+  pi.events?.on?.("permissions:ui_prompt", (data: unknown) =>
+    safe(() => {
+      if (!ownsThisPane || !session) return;
+      session.forwardEvent({ type: "permissions:ui_prompt", payload: data });
+    }),
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export default function (pi: any): void {
+  createExtension(pi);
+}
