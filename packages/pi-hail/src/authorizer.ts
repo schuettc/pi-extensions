@@ -19,8 +19,6 @@ export interface PhoneAuthorizerDeps {
   session: Session;
   /** How long to hold a gate open for the phone before deferring to pi's prompt. */
   timeoutMs: number;
-  /** Injectable clock (defaults to Date.now); present for deterministic tests. */
-  now?: () => number;
 }
 
 /**

@@ -232,6 +232,10 @@ export class Session {
     // Announce the ask to the phone as an event frame so it can render + answer.
     this.deps.send({ event: { type: "permission_prompt", requestId, details } });
     return new Promise<PhoneDecision>((resolve) => {
+      if (this.pendingDecisions.has(requestId)) {
+        resolve("defer");
+        return;
+      }
       this.pendingDecisions.set(requestId, resolve);
     });
   }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { AuthorizerLog } from "@gotgenes/pi-permission-system";
 import { Session } from "./session.ts";
 import { createPhoneAuthorizer } from "./authorizer.ts";
-import { fakeDeps } from "./session.test.ts";
+import { fakeDeps } from "./test-helpers.ts";
 
 /** A no-op AuthorizerLog stub — a link records a trail; the test ignores it. */
 function fakeLog(): AuthorizerLog {
@@ -46,7 +46,7 @@ test("authorize defers on timeout", async () => {
     const s = new Session(fakeDeps());
     s.onInbound({ prompt: { text: "x", from: "p", requestId: "r1" } });
     s.turnStart();
-    const auth = createPhoneAuthorizer({ session: s, timeoutMs: 10, now: clock.now });
+    const auth = createPhoneAuthorizer({ session: s, timeoutMs: 10 });
     const p = auth.authorize({ requestId: "rX" } as never, {} as never, fakeLog());
     clock.advance(11);
     assert.deepEqual(await p, { kind: "defer" });
