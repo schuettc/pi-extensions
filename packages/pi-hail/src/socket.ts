@@ -1,0 +1,238 @@
+// DaemonSocket: one long-lived NDJSON connection per pi process to the daemon's
+// Unix control socket (C4). Owns framing, the register round-trip, and
+// reconnect-with-backoff. It NEVER blocks pi: a missing/slow daemon must resolve
+// to "not connected", never throw synchronously or leave an unhandled rejection.
+
+import { createConnection } from "node:net";
+import {
+  encodeLine,
+  splitFrames,
+  decodeLine,
+  type RegisterArgs,
+  type RegisterReply,
+} from "./protocol.ts";
+
+/** Minimal duplex surface the socket needs; the real one wraps node:net. */
+export interface Duplex {
+  write(s: string): void;
+  on(ev: "data", cb: (chunk: string) => void): void;
+  on(ev: "close" | "error", cb: () => void): void;
+  end(): void;
+}
+
+export type Connect = (path: string) => Promise<Duplex>;
+
+/**
+ * Resolve the daemon socket path (C4): `$XDG_RUNTIME_DIR/hail/daemon.sock`,
+ * else `$TMPDIR/hail/daemon.sock` (macOS fallback).
+ */
+export function resolveSocketPath(env: NodeJS.ProcessEnv = process.env): string {
+  const base = env.XDG_RUNTIME_DIR || env.TMPDIR || "/tmp";
+  const trimmed = base.endsWith("/") ? base.slice(0, -1) : base;
+  return `${trimmed}/hail/daemon.sock`;
+}
+
+/** The real connect: wrap node:net.createConnection adapted to Duplex. */
+export const realConnect: Connect = (path: string) =>
+  new Promise<Duplex>((resolve, reject) => {
+    const conn = createConnection({ path });
+    conn.setEncoding("utf8");
+    const onError = (err: Error) => {
+      conn.removeListener("connect", onConnect);
+      reject(err);
+    };
+    const onConnect = () => {
+      conn.removeListener("error", onError);
+      const duplex: Duplex = {
+        write: (s: string) => {
+          conn.write(s);
+        },
+        on: (ev: "data" | "close" | "error", cb: (...a: never[]) => void) => {
+          conn.on(ev, cb as (...a: unknown[]) => void);
+        },
+        end: () => conn.end(),
+      };
+      resolve(duplex);
+    };
+    conn.once("error", onError);
+    conn.once("connect", onConnect);
+  });
+
+interface Deps {
+  connect: Connect;
+  path?: string;
+  backoffMs?: number[];
+  onLine: (msg: unknown) => void;
+  onDown: () => void;
+  /** The socket owns reconnect scheduling but delegates re-registration here. */
+  onReconnect?: () => void;
+}
+
+const DEFAULT_BACKOFF = [500, 1000, 2000, 5000, 10000];
+
+export class DaemonSocket {
+  private readonly connect: Connect;
+  private readonly path: string;
+  private readonly backoffMs: number[];
+  private readonly onLine: (msg: unknown) => void;
+  private readonly onDown: () => void;
+  private readonly onReconnect?: () => void;
+
+  private duplex: Duplex | null = null;
+  private buffer = "";
+  private isConnected = false;
+  private closed = false;
+  private attempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Resolver for the pending register() call, cleared on first reply. */
+  private pendingRegister: ((reply: RegisterReply) => void) | null = null;
+
+  constructor(deps: Deps) {
+    this.connect = deps.connect;
+    this.path = deps.path ?? resolveSocketPath();
+    this.backoffMs = deps.backoffMs ?? DEFAULT_BACKOFF;
+    this.onLine = deps.onLine;
+    this.onDown = deps.onDown;
+    this.onReconnect = deps.onReconnect;
+  }
+
+  /**
+   * Connect, send the register frame, and resolve on the daemon's first reply
+   * line. Rejects if connect fails (and schedules a retry).
+   */
+  async register(args: RegisterArgs): Promise<RegisterReply> {
+    if (this.closed) {
+      throw new Error("DaemonSocket: closed");
+    }
+    let duplex: Duplex;
+    try {
+      duplex = await this.connect(this.path);
+    } catch (err) {
+      // Connect failure must never leave pi hanging: reject register and retry.
+      this.scheduleReconnect();
+      throw err instanceof Error ? err : new Error(String(err));
+    }
+    this.duplex = duplex;
+    this.buffer = "";
+    this.isConnected = true;
+    this.attempt = 0;
+
+    const replyPromise = new Promise<RegisterReply>((resolve) => {
+      this.pendingRegister = resolve;
+    });
+
+    duplex.on("data", (chunk: string) => this.onData(chunk));
+    duplex.on("close", () => this.onDisconnect());
+    duplex.on("error", () => this.onDisconnect());
+
+    // Best-effort write of the register frame.
+    try {
+      duplex.write(encodeLine({ cmd: "session.register", args }));
+    } catch {
+      // A dead socket surfaces via close/error; do not throw into the caller.
+    }
+
+    return replyPromise;
+  }
+
+  /** Best-effort send; a silent no-op while disconnected. */
+  send(obj: unknown): void {
+    if (!this.isConnected || !this.duplex) return;
+    try {
+      this.duplex.write(encodeLine(obj));
+    } catch {
+      // never throw into pi
+    }
+  }
+
+  connected(): boolean {
+    return this.isConnected;
+  }
+
+  /** Schedule a reconnect with backoff; caller re-registers via onReconnect. */
+  reconnect(): void {
+    this.scheduleReconnect();
+  }
+
+  close(): void {
+    this.closed = true;
+    this.isConnected = false;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.duplex) {
+      try {
+        this.duplex.end();
+      } catch {
+        // ignore
+      }
+      this.duplex = null;
+    }
+    this.pendingRegister = null;
+  }
+
+  private onData(chunk: string): void {
+    this.buffer += chunk;
+    const { lines, rest } = splitFrames(this.buffer);
+    this.buffer = rest;
+    for (const line of lines) {
+      // The first inbound line after register is the reply, not a stream frame.
+      if (this.pendingRegister) {
+        const resolve = this.pendingRegister;
+        this.pendingRegister = null;
+        try {
+          resolve(decodeLine(line) as RegisterReply);
+        } catch {
+          // malformed reply is dropped, not fatal
+        }
+        continue;
+      }
+      // Each frame wrapped so a malformed line is dropped, not fatal.
+      try {
+        this.onLine(decodeLine(line));
+      } catch {
+        // drop malformed line
+      }
+    }
+  }
+
+  private onDisconnect(): void {
+    if (this.closed) return;
+    const wasConnected = this.isConnected;
+    this.isConnected = false;
+    this.duplex = null;
+    if (wasConnected) {
+      try {
+        this.onDown();
+      } catch {
+        // never throw into pi
+      }
+    }
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed) return;
+    if (this.reconnectTimer) return;
+    const idx = Math.min(this.attempt, this.backoffMs.length - 1);
+    const delay = this.backoffMs[idx];
+    this.attempt++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed) return;
+      // The session knows the register args + replay cursor; delegate to it.
+      if (this.onReconnect) {
+        try {
+          this.onReconnect();
+        } catch {
+          // never throw; a failed re-register will re-schedule via register()
+        }
+      }
+    }, delay);
+    // Don't keep the event loop alive on our account.
+    if (typeof this.reconnectTimer === "object" && this.reconnectTimer && "unref" in this.reconnectTimer) {
+      (this.reconnectTimer as { unref: () => void }).unref();
+    }
+  }
+}
