@@ -105,6 +105,44 @@ test("socket close makes connected() false, fires onDown, and send() is a silent
   sock.close();
 });
 
+// Guards: an async onReconnect that rejects (connect failed) must NOT surface an unhandled rejection that kills pi.
+test("async onReconnect that rejects does not leak an unhandled rejection", async () => {
+  const fake = new FakeDuplex();
+  const sock = new DaemonSocket({
+    connect: async () => fake,
+    // fire the reconnect timer promptly
+    backoffMs: [0],
+    onLine: () => {},
+    onDown: () => {},
+    onReconnect: async () => {
+      throw new Error("connect failed");
+    },
+  });
+  const p = sock.register(REGISTER_ARGS);
+  await Promise.resolve();
+  await Promise.resolve();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await p;
+
+  let leaked: unknown = null;
+  const guard = (reason: unknown) => {
+    leaked = reason;
+  };
+  process.once("unhandledRejection", guard);
+  try {
+    // trigger a reconnect: emit close on the fake duplex
+    fake.emit("close");
+    // let the [0]ms reconnect timer fire and the rejected onReconnect settle
+    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(leaked, null, "onReconnect rejection must not escape as unhandledRejection");
+  } finally {
+    process.removeListener("unhandledRejection", guard);
+    sock.close();
+  }
+});
+
 // Guards: resolveSocketPath prefers XDG_RUNTIME_DIR then TMPDIR (macOS), matching the CLI's own path (C4).
 test("resolveSocketPath honors XDG_RUNTIME_DIR then TMPDIR", () => {
   assert.equal(

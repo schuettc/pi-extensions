@@ -65,7 +65,7 @@ interface Deps {
   onLine: (msg: unknown) => void;
   onDown: () => void;
   /** The socket owns reconnect scheduling but delegates re-registration here. */
-  onReconnect?: () => void;
+  onReconnect?: () => void | Promise<void>;
 }
 
 const DEFAULT_BACKOFF = [500, 1000, 2000, 5000, 10000];
@@ -76,7 +76,7 @@ export class DaemonSocket {
   private readonly backoffMs: number[];
   private readonly onLine: (msg: unknown) => void;
   private readonly onDown: () => void;
-  private readonly onReconnect?: () => void;
+  private readonly onReconnect?: () => void | Promise<void>;
 
   private duplex: Duplex | null = null;
   private buffer = "";
@@ -111,6 +111,11 @@ export class DaemonSocket {
       // Connect failure must never leave pi hanging: reject register and retry.
       this.scheduleReconnect();
       throw err instanceof Error ? err : new Error(String(err));
+    }
+    // close() may have been called while connect() was in flight.
+    if (this.closed) {
+      duplex.end();
+      throw new Error("DaemonSocket: closed");
     }
     this.duplex = duplex;
     this.buffer = "";
@@ -173,27 +178,31 @@ export class DaemonSocket {
   }
 
   private onData(chunk: string): void {
-    this.buffer += chunk;
-    const { lines, rest } = splitFrames(this.buffer);
-    this.buffer = rest;
-    for (const line of lines) {
-      // The first inbound line after register is the reply, not a stream frame.
-      if (this.pendingRegister) {
-        const resolve = this.pendingRegister;
-        this.pendingRegister = null;
-        try {
-          resolve(decodeLine(line) as RegisterReply);
-        } catch {
-          // malformed reply is dropped, not fatal
+    try {
+      this.buffer += chunk;
+      const { lines, rest } = splitFrames(this.buffer);
+      this.buffer = rest;
+      for (const line of lines) {
+        // The first inbound line after register is the reply, not a stream frame.
+        if (this.pendingRegister) {
+          const resolve = this.pendingRegister;
+          this.pendingRegister = null;
+          try {
+            resolve(decodeLine(line) as RegisterReply);
+          } catch {
+            // malformed reply is dropped, not fatal
+          }
+          continue;
         }
-        continue;
+        // Each frame wrapped so a malformed line is dropped, not fatal.
+        try {
+          this.onLine(decodeLine(line));
+        } catch {
+          // drop malformed line
+        }
       }
-      // Each frame wrapped so a malformed line is dropped, not fatal.
-      try {
-        this.onLine(decodeLine(line));
-      } catch {
-        // drop malformed line
-      }
+    } catch {
+      // never throw into pi
     }
   }
 
@@ -223,11 +232,11 @@ export class DaemonSocket {
       if (this.closed) return;
       // The session knows the register args + replay cursor; delegate to it.
       if (this.onReconnect) {
-        try {
-          this.onReconnect();
-        } catch {
-          // never throw; a failed re-register will re-schedule via register()
-        }
+        // A sync try/catch cannot catch a rejected promise from an async
+        // callback, so bridge through Promise.resolve().
+        Promise.resolve(this.onReconnect()).catch(() => {
+          // connect failure already re-schedules via register()
+        });
       }
     }, delay);
     // Don't keep the event loop alive on our account.
