@@ -20,7 +20,6 @@ export interface ExtensionDeps {
   connect?: Connect;
   socketPath?: string;
   getPermissionsService?: (sessionId: string) => PermissionsService | undefined;
-  now?: () => number;
   timeoutMs?: number;
 }
 
@@ -61,7 +60,13 @@ function tmuxWindowName(): string | undefined {
 // package `@mariozechner/pi-coding-agent`; this monorepo installs
 // `@earendil-works/pi-coding-agent` — try whichever is present, then fall back
 // to `pi --version` once, then "unknown". Never hardcoded.
+let piVersionCache: string | undefined;
 function resolvePiVersion(): string {
+  if (piVersionCache !== undefined) return piVersionCache;
+  piVersionCache = resolvePiVersionUncached();
+  return piVersionCache;
+}
+function resolvePiVersionUncached(): string {
   const require = createRequire(import.meta.url);
   for (const name of ["@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"]) {
     try {
@@ -232,9 +237,9 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
     try {
       if (!ownsThisPane || !session) return { action: "continue" };
       const e = event as { source?: string; text?: string } | null;
-      if (e?.source === "interactive" && heldFlag) {
-        session.submitLocalInput(e.text ?? "");
-        return { action: "handled" };
+      if (e?.source === "interactive") {
+        const passthrough = session.submitLocalInput(e.text ?? "");
+        if (!passthrough) return { action: "handled" };
       }
     } catch {
       // Never let an input handler throw into pi.

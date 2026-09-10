@@ -130,6 +130,28 @@ test("inbound prompt calls pi.sendUserMessage", async () => {
   assert.deepEqual(sendUserMessage.calls[0], ["do it"]);
 });
 
+// Guards: local typing during a phone-driven turn is HELD (not passed through to pi) — the soft-lock input hold (spec §4).
+test("interactive input during a phone turn is held, but passes through while idle", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  // While idle (no phone turn), interactive input passes through untouched.
+  const idleResults = fire("input", { source: "interactive", text: "hi" }, makeCtx());
+  assert.deepEqual(idleResults[0], { action: "continue" });
+  // A phone prompt starts a phone-driven turn.
+  fake.push('{"prompt":{"text":"do it","from":"p1","requestId":"r1"}}\n');
+  await tick();
+  fire("turn_start", { type: "turn_start" }, makeCtx());
+  // Now local typing must be HELD, not passed through to pi.
+  const heldResults = fire("input", { source: "interactive", text: "local edit" }, makeCtx());
+  assert.deepEqual(heldResults[0], { action: "handled" });
+});
+
 // Guards: no daemon → the extension is silent and pi still starts (never blocks / never throws).
 test("failed connect does not throw from session_start", async () => {
   const { pi, fire } = makeFakePi();
