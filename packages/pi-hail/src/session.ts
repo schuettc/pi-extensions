@@ -54,6 +54,12 @@ export class Session {
 
   /** Daemon's last-seen device sequence number, from the register reply. */
   private have: number | undefined = undefined;
+  /**
+   * Whether we've already completed a successful register. The FIRST register
+   * is a fresh connect (no replay); a later one is a reconnect, which must
+   * backfill the gap after the daemon's `have` cursor.
+   */
+  private hasRegistered = false;
   /** false after a version-mismatch refusal → inert. */
   private isActive = true;
 
@@ -77,6 +83,17 @@ export class Session {
   onRegisterReply(reply: RegisterReply): void {
     if (reply.ok) {
       this.have = reply.data.have;
+      // A reconnect (not the first register): replay pi's own session-file
+      // events after the daemon's `have` cursor so device sequence numbers stay
+      // continuous, BEFORE live forwarding resumes. First-connect skips replay.
+      if (this.hasRegistered) {
+        const events = this.deps.readSessionEvents(this.have ?? 0);
+        for (const event of events) {
+          // Wrap each entry exactly as live forwarding does: send({ event }).
+          this.deps.send({ event });
+        }
+      }
+      this.hasRegistered = true;
       return;
     }
     // ok:false → version mismatch / refusal. Go inert. Task 9 renders the notice.

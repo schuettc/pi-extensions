@@ -132,6 +132,28 @@ test("phone turn emits lock held on start and released on end", () => {
   assert.deepEqual(deps.send.calls[3][0], { lock: "released" });
 });
 
+// Guards: after a daemon restart, replay backfills the gap; a first connect must NOT replay (no double-send).
+test("a reconnect register reply replays events; a first-connect reply does not", () => {
+  const deps = fakeDeps();
+  const replayed = [
+    { type: "turn_start" },
+    { type: "message_start", id: "m9" },
+  ];
+  // Stub the replay source to return known entries regardless of cursor.
+  deps.readSessionEvents = (_sinceSeq: number): unknown[] => replayed;
+  const s = new Session(deps);
+
+  // First connect: stores `have`, does not replay.
+  s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.3.0", accepted: true, have: 2 } });
+  assert.equal(deps.send.calls.length, 0);
+
+  // Reconnect: replays each returned entry as a live { event } frame, in order.
+  s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.3.0", accepted: true, have: 5 } });
+  assert.equal(deps.send.calls.length, replayed.length);
+  assert.deepEqual(deps.send.calls[0][0], { event: { type: "turn_start" } });
+  assert.deepEqual(deps.send.calls[1][0], { event: { type: "message_start", id: "m9" } });
+});
+
 // Guards: a presence frame updates the status line.
 test("onInbound presence sets the status text", () => {
   const deps = fakeDeps();
