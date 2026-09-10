@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deliveryMode, nudgeText, parseToggle, shouldNudge } from "./bang.ts";
+import { bangKeyAction, deliveryMode, nudgeText, parseToggle, shouldNudge } from "./bang.ts";
 
 test("shouldNudge: plain successful ! nudges", () => {
   assert.equal(
@@ -65,6 +65,26 @@ test("nudgeText: long commands are truncated", () => {
 test("deliveryMode: idle steers, busy follows up", () => {
   assert.equal(deliveryMode(true), "steer");
   assert.equal(deliveryMode(false), "followUp");
+});
+
+test("bangKeyAction: ! into empty editor auto-spaces", () => {
+  assert.equal(bangKeyAction("!", ""), "autospace");
+});
+
+test("bangKeyAction: second ! upgrades the auto-spaced prefix to !!", () => {
+  assert.equal(bangKeyAction("!", "! "), "upgrade");
+});
+
+test("bangKeyAction: ! mid-text passes through", () => {
+  assert.equal(bangKeyAction("!", "echo hi"), "pass");
+  assert.equal(bangKeyAction("!", "! ls"), "pass");
+  assert.equal(bangKeyAction("!", "!! "), "pass");
+});
+
+test("bangKeyAction: multi-char input (paste, escape sequences) passes through", () => {
+  assert.equal(bangKeyAction("!ls", ""), "pass");
+  assert.equal(bangKeyAction("\u001b[A", ""), "pass");
+  assert.equal(bangKeyAction("a", ""), "pass");
 });
 
 test("parseToggle: on/off recognized, everything else is status", () => {
