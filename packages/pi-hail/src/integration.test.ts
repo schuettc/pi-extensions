@@ -7,21 +7,28 @@
 // accepts — the same socket a hand-started Mac pi uses to appear on the phone.
 //
 // WHY THIS IS OPT-IN (skipped by default):
-//   The real daemon is a production process. On macOS it stores the host
-//   identity in the login Keychain under the FIXED, non-path-scoped service
-//   "tools.hail" (internal/platform/secrets_darwin.go) — there is no
-//   disposable-keychain override. So booting it on a developer's primary Mac
-//   would touch the same Keychain entry the real daemon uses, and a second
-//   relay connection under the same host identity collides with a running
-//   daemon. This test therefore refuses to run unless HAIL_INTEGRATION=1 is
-//   set explicitly, and it must only be set on a host that is NOT already
-//   running hail and can use a throwaway login Keychain (a CI runner or a
-//   scratch account). It never runs in the default `npm test`.
+//   The real daemon is a production process: it boots the actual `hail`
+//   binary, opens a control socket, and writes a host identity into the macOS
+//   login Keychain. So the test refuses to run unless HAIL_INTEGRATION=1 is set
+//   explicitly, and it never runs in the default `npm test`.
+//
+//   It stays off the LIVE keychain identity by using hail's disposable-service
+//   override (F22, HAIL_KEYCHAIN_SERVICE): the daemon reads/writes its Keychain
+//   items under whatever service that env names, and this test defaults it to
+//   "tools.hail.itest" — never the production "tools.hail" — then deletes those
+//   items in teardown, leaving the Mac's keychain as it found it. It refuses to
+//   run against the live "tools.hail" service outright. XDG_RUNTIME_DIR/
+//   XDG_STATE_HOME/XDG_CONFIG_HOME are isolated to a temp dir so the socket,
+//   state and config are throwaway; HOME is NOT overridden — on darwin that
+//   breaks the `security` CLI's keychain resolution and the daemon dies at
+//   startup (F24).
 //
 // HOW TO RUN (on a clean host):
-//   1. Build the daemon from a hail checkout on main:
+//   1. Build the daemon from a hail checkout on main (F21 gives the proj-probe
+//      a timeout, F22 the keychain-service override):
 //        (cd /path/to/hail && go build -o /tmp/hail ./cmd/hail)
 //   2. HAIL_INTEGRATION=1 HAIL_BIN=/tmp/hail \
+//        [HAIL_KEYCHAIN_SERVICE=tools.hail.itest] \
 //        node --test packages/pi-hail/src/integration.test.ts
 //
 // SCOPE: this exercises the extension->daemon direction (register + frames)
@@ -33,6 +40,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, existsSync, writeFileSync, mkdirSync, rmSync, readFileSync, openSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,15 +48,22 @@ import { DaemonSocket, realConnect } from "./socket.ts";
 import { EXTENSION_VERSION } from "./version.ts";
 import type { RegisterReply } from "./protocol.ts";
 
-// Resolve the daemon binary and the opt-in gate up front so the skip reason is
-// specific.
+// Resolve the daemon binary, the disposable keychain service, and the opt-in
+// gate up front so the skip reason is specific.
 const hailBin = process.env.HAIL_BIN;
+// The daemon writes its host identity under this Keychain service (F22). It
+// defaults to a scratch service and is deleted in teardown; it must never be
+// the live "tools.hail", which the test refuses outright.
+const KEYCHAIN_SERVICE = process.env.HAIL_KEYCHAIN_SERVICE ?? "tools.hail.itest";
 function skipReason(): string | false {
   if (process.env.HAIL_INTEGRATION !== "1") {
     return "set HAIL_INTEGRATION=1 (and HAIL_BIN) to run against the real daemon; see file header for why this is opt-in";
   }
   if (!hailBin || !existsSync(hailBin)) {
     return `HAIL_BIN not set or missing (${hailBin ?? "unset"}); build with: go build -o /tmp/hail ./cmd/hail`;
+  }
+  if (KEYCHAIN_SERVICE === "tools.hail") {
+    return "refusing to run against the live 'tools.hail' keychain service; the test writes and DELETES items under HAIL_KEYCHAIN_SERVICE — leave it unset or use a scratch service";
   }
   return false;
 }
@@ -66,20 +81,24 @@ test(
   "the real daemon accepts session.register and the turn/event/exit stream (C4)",
   { skip: skipReason() },
   async () => {
-    // Fully isolated runtime so the daemon's socket, state and config are
-    // throwaway. provider=builtin keeps the daemon from probing `proj`, whose
-    // detection ("proj list --json") blocks when a `proj` TUI is on PATH.
+    // Isolate the daemon's socket/state/config to a temp dir via XDG. HOME is
+    // deliberately NOT overridden: on darwin that breaks the `security` CLI's
+    // keychain resolution and the daemon dies at startup (F24). The keychain
+    // items are isolated instead by HAIL_KEYCHAIN_SERVICE.
     const root = mkdtempSync(join(tmpdir(), "pi-hail-it-"));
     const env = {
       ...process.env,
       XDG_RUNTIME_DIR: join(root, "run"),
       XDG_STATE_HOME: join(root, "state"),
       XDG_CONFIG_HOME: join(root, "config"),
-      HOME: join(root, "home"),
+      HAIL_KEYCHAIN_SERVICE: KEYCHAIN_SERVICE,
     };
-    for (const d of ["run", "state", "home", "config/hail"]) {
+    for (const d of ["run", "state", "config/hail"]) {
       mkdirSync(join(root, d), { recursive: true });
     }
+    // provider=builtin keeps the daemon off the `proj` auto-probe. With F21's
+    // probe timeout this is no longer required, but it is harmless and keeps
+    // the test fast on a host that happens to have a `proj` on PATH.
     writeFileSync(join(root, "config/hail/config.toml"), 'provider = "builtin"\n');
 
     const sockPath = join(root, "run", "hail", "daemon.sock");
@@ -144,10 +163,30 @@ test(
         await new Promise((r) => setTimeout(r, 300));
         if (daemon.pid && isAlive(daemon.pid)) daemon.kill("SIGKILL");
       }
+      // Leave the Mac's keychain as we found it: delete every generic-password
+      // item the daemon wrote under our scratch service (identity/host and any
+      // sibling entries). Best-effort; the live service is never reached here
+      // because skipReason() refuses it.
+      cleanupKeychain(KEYCHAIN_SERVICE);
       rmSync(root, { recursive: true, force: true });
     }
   },
 );
+
+// Delete all generic-password items under `service` from the login keychain.
+// Each `security delete-generic-password -s <service>` removes ONE matching
+// item and exits non-zero once none remain; loop until it stops (capped so a
+// surprising keychain can never spin forever). darwin-only and never invoked
+// for the live service (guarded in skipReason).
+function cleanupKeychain(service: string): void {
+  if (process.platform !== "darwin" || service === "tools.hail") return;
+  for (let i = 0; i < 32; i++) {
+    const r = spawnSync("security", ["delete-generic-password", "-s", service], {
+      stdio: "ignore",
+    });
+    if (r.status !== 0) break;
+  }
+}
 
 function isAlive(pid: number): boolean {
   try {
