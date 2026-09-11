@@ -8,6 +8,6 @@
   "keywords": ["pi-package", "pi-extension", "pi-coding-agent", "hail", "remote", "phone"],
   "files": ["src", "README.md"],
   "pi": { "extensions": ["./src/index.ts"] },
-  "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json", "test": "node --test src/*.test.ts" },
+  "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json", "test": "node --test src/*.test.ts", "test:integration": "node --test src/integration.test.ts" },
   "devDependencies": { "@earendil-works/pi-coding-agent": "^0.84.3", "@gotgenes/pi-permission-system": "^30.2.0", "typescript": "^5.6.0" }
 }
