@@ -43,17 +43,20 @@ node --test src/*.test.ts
 
 `src/integration.test.ts` runs pi-hail's socket client against the **real** hail
 daemon binary over the C4 control socket. It is **opt-in** and skipped by the
-default `npm test`, because the daemon stores the host identity in the macOS
-login Keychain under the fixed service `tools.hail` (no disposable-keychain
-override) and opens a relay connection under that identity — so it must only run
-on a host that is **not** already running hail and can use a throwaway Keychain
-(a CI runner or a scratch account), never a developer's primary Mac with a live
-daemon.
+default `npm test`, because it boots the actual `hail` binary and writes a host
+identity into the macOS login Keychain.
+
+It stays off the live identity by using hail's disposable-service override
+(`HAIL_KEYCHAIN_SERVICE`, default `tools.hail.itest` — never the production
+`tools.hail`, which it refuses), deletes those items in teardown, and isolates
+the socket/state/config under a temp `XDG_*` (it does **not** override `HOME`,
+which on darwin breaks the `security` CLI). Run it on a clean host or a scratch
+account.
 
 ```sh
 # 1. Build the daemon from a hail checkout on main:
 (cd /path/to/hail && go build -o /tmp/hail ./cmd/hail)
-# 2. Run the opt-in integration test:
+# 2. Run the opt-in integration test (HAIL_KEYCHAIN_SERVICE defaults to a scratch service):
 HAIL_INTEGRATION=1 HAIL_BIN=/tmp/hail npm --workspace packages/pi-hail run test:integration
 ```
 
