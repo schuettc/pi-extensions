@@ -52,12 +52,18 @@ function defaultCreelOnPath(): boolean {
 function defaultSpawnPopup(tmux: TmuxContext, command: string): void {
   // display-popup returns immediately (the popup runs detached on the server),
   // so completion is observed out-of-band via the status file.
+  //
+  // -d anchors the popup's working directory to this process's cwd — the folder
+  // pi was launched in, i.e. the project being worked on. creel resolves a
+  // relative --dest (".env") against that cwd, so the key lands in the project's
+  // .env. Without -d, tmux opens the popup in $HOME and the .env goes there.
   execFileSync(
     "tmux",
     [
       "-L", tmux.socket,
       "display-popup",
       "-t", tmux.pane,
+      "-d", process.cwd(),
       "-E",
       "-w", POPUP_WIDTH,
       "-h", POPUP_HEIGHT,
