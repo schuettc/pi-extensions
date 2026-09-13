@@ -20,6 +20,7 @@ export interface ExtensionDeps {
   connect?: Connect;
   socketPath?: string;
   getPermissionsService?: (sessionId: string) => PermissionsService | undefined;
+  getTmuxSessionId?: () => string | undefined;
   timeoutMs?: number;
 }
 
@@ -37,14 +38,13 @@ function safe(fn: () => void | Promise<void>): void {
   }
 }
 
-// The tmux window name is the daemon-spawn signal (family rule: the ONLY
-// process.env read allowed for identity, and it is not exported). A bare
-// terminal has no $TMUX and falls back to the project name. Guarded so a test
-// (or a machine without tmux) never has this throw or hang.
-function tmuxWindowName(): string | undefined {
+// Read metadata from the current tmux pane without shell interpolation. A bare
+// terminal has no $TMUX and falls back to pi's own session/project identity.
+// Guarded so a test (or a machine without tmux) never has this throw or hang.
+function tmuxValue(format: string): string | undefined {
   if (!process.env.TMUX) return undefined;
   try {
-    const out = execFileSync("tmux", ["display-message", "-p", "#{window_name}"], {
+    const out = execFileSync("tmux", ["display-message", "-p", format], {
       encoding: "utf8",
       timeout: 1000,
     }).trim();
@@ -52,6 +52,14 @@ function tmuxWindowName(): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function tmuxWindowName(): string | undefined {
+  return tmuxValue("#{window_name}");
+}
+
+function tmuxHailSessionId(): string | undefined {
+  return tmuxValue("#{@hail_session}");
 }
 
 // Resolve the loaded pi build's version for the C6 handshake. The package.json
@@ -171,7 +179,10 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         };
       };
 
-      const sessionId = String(c.sessionManager.getSessionId());
+      const hailSessionId = deps.getTmuxSessionId
+        ? deps.getTmuxSessionId()
+        : tmuxHailSessionId();
+      const sessionId = hailSessionId ?? String(c.sessionManager.getSessionId());
       const dir = c.cwd;
       const project = basename(dir);
       const work = tmuxWindowName() ?? basename(dir);
