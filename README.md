@@ -10,7 +10,7 @@ own `.tools` domain (like galley/muster/hail); Channels lives at
 | [`pi-quiet`](packages/pi-quiet) | ready | Calm one-line bash rendering (`ctrl+o` restores full built-in rendering), pi's shell settings honoured, `AGENT_SESSION_ID` stamped on every command from `PI_SESSION_ID`. Execution stays pi's built-in. |
 | [`channels.tools`](packages/channels.tools) ([channels.tools](https://channels.tools)) | ready | Connect channel servers that push events into a live pi session — wake when idle, queue when busy — and proxy their tools. Client for the `claude/channel` convention, with a dependency-free reference server. |
 | [`pi-bang`](packages/pi-bang) | new | Make `!` active: when a user-run shell command completes, trigger a model turn to react to the output (`!!` stays passive; `/bang on\|off` to toggle). Execution stays pi's built-in backend. |
-| [`@schuettc/pi-hail`](packages/pi-hail) | new | Connect a pi session to the local hail daemon so a paired phone can watch it and drive it: registers the session, streams events, applies phone prompts as typed input, shows phone presence in the status line, and soft-locks each side against the other. |
+| [`pi-hail`](packages/pi-hail) | new | Connect a pi session to the local hail daemon so a paired phone can watch it and drive it: registers the session, streams events, applies phone prompts as typed input, shows phone presence in the status line, and soft-locks each side against the other. |
 
 ## Publishing standard
 
