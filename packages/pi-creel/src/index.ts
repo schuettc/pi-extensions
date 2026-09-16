@@ -182,11 +182,15 @@ function defaultResolveSessionId(tmux: TmuxContext): string | undefined {
 
 // startCreelWatch notifies THIS pi session when the user saves a secret via
 // creel outside a request_secret call (the tmux keybind runs creel with
-// --event-file <dir>/<session>.json). It resolves the session id so a save in
-// one session never notifies another (routing by tmux session), watches the
-// events dir, and on a NEW event delivers a value-free note - steering a fresh
-// turn when idle, queuing after the current turn when busy (mirroring
-// pi-wakeup). It is a no-op outside tmux, where there is no keybind to hear.
+// --event-file <root>/<socket>/<session>.json). Routing must be GLOBALLY
+// unique: a tmux session id (`$0`, `$1`...) is only unique within one tmux
+// server, and we run one socket per project against a shared events root, so
+// the key is scoped by socket name first, session id second. Without this a
+// save on one socket wakes a same-numbered session on every other socket. It
+// watches this socket's subdir, and on a NEW event delivers a value-free note -
+// steering a fresh turn when idle, queuing after the current turn when busy
+// (mirroring pi-wakeup). It is a no-op outside tmux, where there is no keybind
+// to hear.
 export function startCreelWatch(pi: any, deps: Deps = {}): void {
   const resolveT = deps.resolveTmux ?? resolveTmux;
   const resolveSid = deps.resolveSessionId ?? defaultResolveSessionId;
@@ -201,7 +205,9 @@ export function startCreelWatch(pi: any, deps: Deps = {}): void {
   const sid = resolveSid(tmux);
   if (!sid) return;
 
-  const dir = join(home, EVENTS_SUBDIR);
+  // Scope by socket so `$0` on proj-foo and `$0` on proj-bar never collide in
+  // the shared events root.
+  const dir = join(home, EVENTS_SUBDIR, tmux.socket);
   try {
     ensureDir(dir);
   } catch {
@@ -218,7 +224,16 @@ export function startCreelWatch(pi: any, deps: Deps = {}): void {
   // Dedupe by mtime: one write can fire the watcher twice (rename+change), and
   // two saves with identical name/dest/action have identical CONTENT, so mtime
   // - which advances on every write - is the reliable "is this a new save" key.
+  // Seed from any file left by a PRIOR session at this same sid so a stray dir
+  // event (macOS can deliver a null filename, bypassing the name filter) can
+  // never re-deliver that stale note - only a fresh write, with a new mtime,
+  // fires.
   let lastMtimeMs = -1;
+  try {
+    lastMtimeMs = mtimeMs(target);
+  } catch {
+    // no pre-existing file - the first real save is a genuine new event
+  }
   const handle = startWatch(dir, (_event: string, changed: string | null) => {
     if (changed !== null && changed !== fileName) return;
     let m: number;

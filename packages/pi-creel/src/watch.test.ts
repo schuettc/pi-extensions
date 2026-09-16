@@ -23,28 +23,78 @@ function fakePi() {
 // watchDeps wires a fully-injected Deps: no real fs, no real tmux. `fire`
 // invokes the captured watch callback for this session's file; `closeFake`
 // reports whether the handle was closed.
-function watchDeps(overrides: Partial<Deps> = {}) {
+// watchDeps models a file that is ABSENT until a save creates it: eventMtimeMs
+// throws while `present` is false (statSync's real behavior on a missing file),
+// so the startup mtime-seed only kicks in when the file already exists. `fire`
+// marks the file present (a save wrote it) before invoking the watch callback,
+// mirroring reality. Pass presentAtStartup:true to simulate a stale file left
+// by a prior session.
+function watchDeps(
+  overrides: Partial<Deps> = {},
+  opts: { presentAtStartup?: boolean; mtime?: number } = {},
+) {
   let cb: ((e: string, f: string | null) => void) | undefined;
   let closed = false;
+  let watchedDir: string | undefined;
+  const mkdirCalls: string[] = [];
+  let present = opts.presentAtStartup ?? false;
+  let mt = opts.mtime ?? 1000;
   const deps: Deps = {
     resolveTmux: () => ({ socket: "s", pane: "%1" }),
     resolveSessionId: () => "$3",
     homedir: () => "/home/u",
-    mkdir: () => {},
-    watch: (_dir, c) => {
+    mkdir: (d) => {
+      mkdirCalls.push(d);
+    },
+    watch: (dir, c) => {
+      watchedDir = dir;
       cb = c;
       return { close() { closed = true; } } as WatchHandle;
     },
     readEventFile: () => '{"name":"STRIPE_KEY","dest":".env","action":"added"}',
-    eventMtimeMs: () => 1000,
+    eventMtimeMs: () => {
+      if (!present) throw new Error("ENOENT");
+      return mt;
+    },
     ...overrides,
   };
   return {
     deps,
-    fire: (file: string | null = "$3.json") => cb?.("change", file),
+    fire: (file: string | null = "$3.json") => {
+      present = true;
+      cb?.("change", file);
+    },
+    setMtime: (v: number) => {
+      mt = v;
+    },
     isClosed: () => closed,
+    watchedDir: () => watchedDir,
+    mkdirCalls: () => mkdirCalls,
   };
 }
+
+test("watches (and creates) a socket-scoped events dir, not the shared root", () => {
+  // session ids (`$0`, `$1`...) are unique only within one tmux server, so the
+  // routing key must include the socket name or a save on one socket wakes a
+  // same-id session on another. The watcher scopes to <root>/<socket>.
+  const { pi } = fakePi();
+  const { deps, watchedDir, mkdirCalls } = watchDeps();
+  startCreelWatch(pi, deps);
+  assert.equal(watchedDir(), "/home/u/.pi/agent/creel-events/s");
+  assert.ok(mkdirCalls().includes("/home/u/.pi/agent/creel-events/s"));
+});
+
+test("a pre-existing stale event file does not fire on the first spurious event", () => {
+  // If this session's file already exists at startup (a prior save at the same
+  // sid), a stray dir event (macOS can deliver a null filename) must not
+  // re-deliver the old note. Seeding lastMtimeMs from the file at startup guards
+  // this: an unchanged mtime is skipped.
+  const { pi, sent } = fakePi();
+  const { deps, fire } = watchDeps({}, { presentAtStartup: true, mtime: 1000 });
+  startCreelWatch(pi, deps);
+  fire(null); // null filename falls through the name filter; mtime is unchanged
+  assert.equal(sent.length, 0);
+});
 
 test("delivers a value-free note on a new event, queued after the turn", () => {
   const { pi, sent } = fakePi();
@@ -69,13 +119,12 @@ test("an idle session steers a fresh turn", () => {
 
 test("the same mtime does not re-notify; a new mtime does", () => {
   const { pi, sent } = fakePi();
-  let mt = 1000;
-  const { deps, fire } = watchDeps({ eventMtimeMs: () => mt });
+  const { deps, fire, setMtime } = watchDeps();
   startCreelWatch(pi, deps);
   fire();
   fire(); // double-fire of one write -> same mtime -> skipped
   assert.equal(sent.length, 1);
-  mt = 2000; // a genuinely new save
+  setMtime(2000); // a genuinely new save
   fire();
   assert.equal(sent.length, 2);
 });
