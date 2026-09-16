@@ -8,7 +8,7 @@ Add the extension to `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "extensions": ["npm:@schuettc/pi-hail"]
+  "extensions": ["npm:pi-hail"]
 }
 ```
 

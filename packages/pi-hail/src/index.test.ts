@@ -94,7 +94,11 @@ test("non-tui context registers nothing", async () => {
 test("tui session_start registers, and turn_start/turn_end forward through the socket", async () => {
   const { pi, fire } = makeFakePi();
   const fake = new FakeDuplex();
-  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  createExtension(pi, {
+    connect: async () => fake,
+    getPermissionsService: () => undefined,
+    getTmuxSessionId: () => undefined,
+  });
   fire("session_start", {}, makeCtx());
   await tick();
   await tick();
@@ -112,6 +116,26 @@ test("tui session_start registers, and turn_start/turn_end forward through the s
   const frames = fake.writes.slice(1).map((w) => JSON.parse(w));
   assert.ok(frames.some((f) => f.turn === "start"), "expected a { turn:'start' } frame");
   assert.ok(frames.some((f) => f.turn === "end"), "expected a { turn:'end' } frame");
+});
+
+// Guards: a daemon-spawned pi must register under the Hail task id stamped on
+// its tmux window, not pi's independently generated native session id. The
+// daemon holds the phone's pending prompt under this exact id.
+test("daemon pane registers with its @hail_session task id", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  const taskId = "cgd7vipge4pis2fc4exiofslmq";
+  createExtension(pi, {
+    connect: async () => fake,
+    getPermissionsService: () => undefined,
+    getTmuxSessionId: () => taskId,
+  });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+
+  const reg = JSON.parse(fake.writes[0]);
+  assert.equal(reg.args.sessionId, taskId);
 });
 
 // Guards: turn lifecycle is emitted ONLY as {turn} frames — never also as an {event} carrying a pi turn rpc, or the daemon rotates turn keys twice per turn (C4, bridge PR #140).
