@@ -46,11 +46,18 @@ export function tokenToText(
   if (token === undefined || token === "") {
     return `Timed out waiting for the creel popup; nothing was recorded for ${name}.`;
   }
+  // howToUse tells the model the two supported ways to consume a mid-session
+  // secret without ever handling the value itself. It must never suggest
+  // reading the .env directly (the value must not enter the harness/context).
+  const howToUse =
+    ` The value was not shown here. To use it, run \`creel exec ${name} -- <command>\`` +
+    ` (that puts ${name} in the command's environment only), or read \`process.env.${name}\`` +
+    ` after a relaunch. Do not read ${dest} yourself.`;
   switch (token) {
     case "added":
-      return `Added ${name} to ${dest} (chmod 600). The value was not shown here.`;
+      return `Added ${name} to ${dest} (chmod 600).` + howToUse;
     case "updated":
-      return `Updated ${name} in ${dest}. The value was not shown here.`;
+      return `Updated ${name} in ${dest}.` + howToUse;
     case "cancelled":
       return `Capture cancelled; nothing was written for ${name}.`;
     default:

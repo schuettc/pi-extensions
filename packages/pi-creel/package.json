@@ -1,6 +1,6 @@
 {
   "name": "pi-creel",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "request_secret for the pi coding agent: capture an API key into a local .env via a tmux popup (the creel tool) so it never enters the chat/context.",
   "type": "module",
   "license": "MIT",

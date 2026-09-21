@@ -33,3 +33,15 @@ test("tokenToText maps every outcome and never echoes a value", () => {
   assert.match(tokenToText("", "K", ".env"), /Timed out/);
   assert.match(tokenToText("weird", "K", ".env"), /unexpected status \(weird\)/);
 });
+
+test("a successful capture tells the model how to consume the secret", () => {
+  for (const token of ["added", "updated"]) {
+    const text = tokenToText(token, "TYPESAFE_API_KEY", ".env");
+    // Points at the containment path (creel exec) with the real var name...
+    assert.match(text, /creel exec TYPESAFE_API_KEY -- /);
+    // ...and the relaunch fallback...
+    assert.match(text, /process\.env\.TYPESAFE_API_KEY/);
+    // ...and steers the model away from reading the .env itself.
+    assert.match(text, /do not read|don't read/i);
+  }
+});
