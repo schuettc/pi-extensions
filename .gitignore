@@ -4,3 +4,4 @@ node_modules/
 
 # SDD design docs (plans/specs) — kept local, not committed
 docs/superpowers/
+.superpowers/
