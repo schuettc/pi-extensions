@@ -1,4 +1,4 @@
-# pi-typesafe
+# pi-typesafe-ai
 
 A generic **TypeSafe (Jev / System One)** capability for the
 [pi coding agent](https://github.com/earendil-works/pi-coding-agent).
