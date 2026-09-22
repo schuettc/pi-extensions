@@ -7,6 +7,9 @@
   "repository": { "type": "git", "url": "git+https://github.com/schuettc/pi-extensions.git", "directory": "packages/pi-typesafe" },
   "keywords": ["pi-package", "pi-extension", "pi-coding-agent", "typesafe", "jev", "system-one"],
   "files": ["src", "README.md"],
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "pi": { "extensions": ["./src/index.ts"] },
   "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json", "test": "node --test src/*.test.ts" },
   "dependencies": { "@typesafe-ai/sdk": "^0.6.0" },

@@ -48,6 +48,8 @@ export class JevClient {
   async evaluate(state: unknown, questions: unknown, opts: { model?: string; timeoutMs?: number } = {}): Promise<{ answers: Record<string, unknown>; usage?: unknown; latencyMs: number }> {
     const apiKey = await this.resolveKey();
     if (!apiKey) throw new TypeSafeConfigError("no TypeSafe API key configured (run /typesafe setup)");
+    // Construct per call: the key + timeout are resolved fresh each call, so a
+    // re-keyed credential file (or changed timeout) takes effect without restart.
     const client = this.clientFactory({ apiKey, timeout: opts.timeoutMs ?? this.defaultTimeoutMs, baseURL: this.baseURL });
     const started = Date.now();
     const res = await client.systemOne({ state, questions, model: opts.model ?? this.defaultModel });
