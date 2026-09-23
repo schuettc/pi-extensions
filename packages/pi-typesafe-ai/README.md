@@ -25,7 +25,9 @@ from other pi extensions.
 
 ## Commands
 
-Manage the TypeSafe API key from inside pi:
+Manage the TypeSafe API key from inside pi. Typing `/typesafe ` (with the
+trailing space) autocompletes the subcommands below, each with a short
+description:
 
 - `/typesafe setup` — opens a **masked** field (characters are shown as `•`).
   Paste your key, press enter to save or esc to cancel (ctrl+u clears).

@@ -1,10 +1,24 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { CredentialStore, resolveTypeSafeDir, validateApiKey } from "./credentials.ts";
 import { promptSecret as defaultPromptSecret } from "./masked-input.ts";
 export * from "./credentials.ts";
 export * from "./client.ts";
 export * from "./bundle.ts";
 export { MaskedInput, promptSecret, type MaskedInputOptions } from "./masked-input.ts";
+
+export const TYPESAFE_SUBCOMMANDS: readonly AutocompleteItem[] = [
+  { value: "setup", label: "setup", description: "Store your TypeSafe API key (masked entry)" },
+  { value: "status", label: "status", description: "Show whether a key is configured (never shows the key)" },
+  { value: "logout", label: "logout", description: "Delete the stored key" },
+];
+
+// `value` replaces only the argument text after `/typesafe `, matching pi's commands.ts example.
+export function typesafeArgumentCompletions(prefix: string): AutocompleteItem[] | null {
+  const p = (prefix || "").trim().toLowerCase();
+  const items = TYPESAFE_SUBCOMMANDS.filter((c) => c.value.startsWith(p)).map((c) => ({ ...c }));
+  return items.length > 0 ? items : null;
+}
 
 export interface TypeSafeExtensionDeps {
   store?: CredentialStore;
@@ -15,7 +29,8 @@ export function createTypeSafeExtension(pi: ExtensionAPI, deps: TypeSafeExtensio
   const store = deps.store ?? new CredentialStore({ dir: resolveTypeSafeDir() });
   const promptSecret = deps.promptSecret ?? defaultPromptSecret;
   pi.registerCommand("typesafe", {
-    description: "Manage the TypeSafe (Jev) API key: setup | status | logout",
+    description: "TypeSafe (Jev) API key: setup | status | logout",
+    getArgumentCompletions: typesafeArgumentCompletions,
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       const sub = (args || "").trim().split(/\s+/)[0] || "status";
       if (sub === "status") {

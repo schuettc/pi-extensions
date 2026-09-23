@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { CredentialStore } from "./credentials.ts";
-import { createTypeSafeExtension } from "./index.ts";
+import { createTypeSafeExtension, typesafeArgumentCompletions, TYPESAFE_SUBCOMMANDS } from "./index.ts";
 
 type CommandOptions = Parameters<ExtensionAPI["registerCommand"]>[1];
 type NotifyType = Parameters<ExtensionUIContext["notify"]>[1];
@@ -27,7 +27,7 @@ function harness(opts: { secret?: string | undefined; confirm?: boolean } = {}) 
   const ctx = { hasUI: true, ui } as unknown as ExtensionCommandContext;
   const promptSecret = async (_ctx: ExtensionCommandContext, title: string) => { prompts.push(title); return secret; };
   const run = (args: string) => commands.get("typesafe")!.handler(args, ctx);
-  return { notes, types, prompts, pi: pi as unknown as ExtensionAPI, promptSecret, run };
+  return { commands, notes, types, prompts, pi: pi as unknown as ExtensionAPI, promptSecret, run };
 }
 
 function tempStore() {
@@ -79,4 +79,33 @@ test("notify is only called with pi's real notification types", async () => {
   for (const args of ["status", "setup", "setup", "status", "bogus", "logout", "status"]) await h.run(args);
   assert.ok(h.types.length > 0);
   for (const t of h.types) assert.ok(t === "info" || t === "warning" || t === "error", `unexpected notify type ${String(t)}`);
+});
+
+test("argument completions: empty prefix lists all subcommands", () => {
+  const items = typesafeArgumentCompletions("");
+  assert.deepEqual(items?.map((i) => i.value), ["setup", "status", "logout"]);
+  assert.equal(TYPESAFE_SUBCOMMANDS.length, 3);
+});
+
+test("argument completions filter by trimmed, case-insensitive prefix", () => {
+  assert.deepEqual(typesafeArgumentCompletions("se")?.map((i) => i.value), ["setup"]);
+  assert.deepEqual(typesafeArgumentCompletions("ST")?.map((i) => i.value), ["status"]);
+  assert.deepEqual(typesafeArgumentCompletions("  lo ")?.map((i) => i.value), ["logout"]);
+  assert.equal(typesafeArgumentCompletions("x"), null);
+});
+
+test("every completion item has value, label and description", () => {
+  for (const i of typesafeArgumentCompletions("") ?? []) {
+    assert.ok(i.value && i.label && i.description, `incomplete item ${JSON.stringify(i)}`);
+  }
+});
+
+test("registered /typesafe command exposes getArgumentCompletions", async () => {
+  const h = harness();
+  createTypeSafeExtension(h.pi, { store: tempStore(), promptSecret: h.promptSecret });
+  const cmd = h.commands.get("typesafe")!;
+  assert.equal(cmd.description, "TypeSafe (Jev) API key: setup | status | logout");
+  assert.equal(typeof cmd.getArgumentCompletions, "function");
+  const items = await cmd.getArgumentCompletions!("sta");
+  assert.deepEqual(items?.map((i) => i.value), ["status"]);
 });
