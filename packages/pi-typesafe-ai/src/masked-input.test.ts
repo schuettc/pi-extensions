@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
-import { MaskedInput } from "./masked-input.ts";
+import type { ExtensionCommandContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { MaskedInput, promptSecret } from "./masked-input.ts";
 
 function harness() {
   const submitted: string[] = [];
@@ -94,4 +95,63 @@ test("render never exceeds the given width", () => {
   assert.equal(lines.length, 3);
   for (const line of lines) assert.ok(visibleWidth(line) <= 10, `line too wide: ${JSON.stringify(line)}`);
   assert.ok(!lines[1]!.includes("k"));
+});
+
+type NotifyType = Parameters<ExtensionUIContext["notify"]>[1];
+type CustomFactory = Parameters<ExtensionUIContext["custom"]>[0];
+
+function fakeCtx(hasUI: boolean) {
+  const notes: { message: string; type: NotifyType }[] = [];
+  const factories: CustomFactory[] = [];
+  const ui: Pick<ExtensionUIContext, "notify" | "custom"> = {
+    notify: (message, type) => { notes.push({ message, type }); },
+    custom: <T>(factory: Parameters<ExtensionUIContext["custom"]>[0]) => {
+      factories.push(factory);
+      return Promise.resolve(undefined as T);
+    },
+  };
+  const ctx = { hasUI, ui } as unknown as ExtensionCommandContext;
+  return { ctx, notes, factories };
+}
+
+async function mount(factory: CustomFactory) {
+  const results: unknown[] = [];
+  let renders = 0;
+  const tui = { requestRender: () => { renders += 1; } } as unknown as Parameters<CustomFactory>[0];
+  const component: Component = await factory(
+    tui,
+    {} as Parameters<CustomFactory>[1],
+    {} as Parameters<CustomFactory>[2],
+    (r) => { results.push(r); },
+  );
+  return { component, results, get renders() { return renders; } };
+}
+
+test("promptSecret without a UI warns and returns undefined", async () => {
+  const f = fakeCtx(false);
+  assert.equal(await promptSecret(f.ctx, "Paste your TypeSafe API key"), undefined);
+  assert.equal(f.notes.length, 1);
+  assert.equal(f.notes[0]!.type, "warning");
+  assert.equal(f.factories.length, 0);
+});
+
+test("promptSecret with a UI mounts a masked input that submits on enter", async () => {
+  const f = fakeCtx(true);
+  await promptSecret(f.ctx, "Paste your TypeSafe API key");
+  assert.equal(f.factories.length, 1);
+  const m = await mount(f.factories[0]!);
+  m.component.handleInput!("a");
+  m.component.handleInput!("b");
+  assert.equal(m.renders, 2);
+  m.component.handleInput!("\r");
+  assert.deepEqual(m.results, ["ab"]);
+});
+
+test("promptSecret with a UI resolves undefined on escape", async () => {
+  const f = fakeCtx(true);
+  await promptSecret(f.ctx, "Paste your TypeSafe API key");
+  const m = await mount(f.factories[0]!);
+  m.component.handleInput!("x");
+  m.component.handleInput!("\x1b");
+  assert.deepEqual(m.results, [undefined]);
 });

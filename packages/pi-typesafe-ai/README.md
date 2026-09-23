@@ -17,7 +17,7 @@ reviewer) build on top of it.
 ## Install
 
 ```
-pi install npm:pi-typesafe
+pi install npm:pi-typesafe-ai
 ```
 
 This registers a `/typesafe` command and exports a small library you can import
@@ -41,7 +41,7 @@ fallback when no key has been stored.
 ## Library
 
 ```ts
-import { CredentialStore, JevClient, evaluateBundle, type Bundle } from "pi-typesafe";
+import { CredentialStore, JevClient, evaluateBundle, type Bundle } from "pi-typesafe-ai";
 
 // Agent-owned credential file at <pi agent dir>/typesafe/config.json.
 const credentials = new CredentialStore({ dir: resolveTypeSafeDir() });

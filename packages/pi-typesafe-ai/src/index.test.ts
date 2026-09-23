@@ -16,18 +16,19 @@ function harness(opts: { secret?: string | undefined; confirm?: boolean } = {}) 
   const notes: string[] = [];
   const types: NotifyType[] = [];
   const prompts: string[] = [];
+  const calls: string[] = [];
   const pi = {
     registerCommand: (name: string, options: CommandOptions) => { commands.set(name, options); },
   } satisfies Pick<ExtensionAPI, "registerCommand">;
   // Typed against the real UI API so a wrong call shape in index.ts fails tsc.
   const ui: Pick<ExtensionUIContext, "notify" | "confirm"> = {
     notify: (message: string, type?: "info" | "warning" | "error") => { notes.push(message); types.push(type); },
-    confirm: async (_title: string, _message: string) => opts.confirm ?? true,
+    confirm: async (_title: string, _message: string) => { calls.push("confirm"); return opts.confirm ?? true; },
   };
   const ctx = { hasUI: true, ui } as unknown as ExtensionCommandContext;
-  const promptSecret = async (_ctx: ExtensionCommandContext, title: string) => { prompts.push(title); return secret; };
+  const promptSecret = async (_ctx: ExtensionCommandContext, title: string) => { calls.push("promptSecret"); prompts.push(title); return secret; };
   const run = (args: string) => commands.get("typesafe")!.handler(args, ctx);
-  return { commands, notes, types, prompts, pi: pi as unknown as ExtensionAPI, promptSecret, run };
+  return { commands, notes, types, prompts, calls, pi: pi as unknown as ExtensionAPI, promptSecret, run };
 }
 
 function tempStore() {
@@ -61,6 +62,29 @@ test("setup cancelled leaves the key unchanged", async () => {
   await h.run("setup");
   assert.equal((await store.read())?.apiKey, "ts_original");
   assert.match(h.notes.at(-1)!, /Cancelled/);
+});
+
+test("setup declined at replace-confirm keeps the key and never prompts", async () => {
+  const h = harness({ confirm: false });
+  const store = tempStore();
+  await store.write("ts_original");
+  createTypeSafeExtension(h.pi, { store, promptSecret: h.promptSecret });
+
+  await h.run("setup");
+  assert.equal((await store.read())?.apiKey, "ts_original");
+  assert.deepEqual(h.prompts, []);
+  assert.match(h.notes.at(-1)!, /Kept/);
+});
+
+test("setup with an existing key confirms before prompting for the secret", async () => {
+  const h = harness();
+  const store = tempStore();
+  await store.write("ts_original");
+  createTypeSafeExtension(h.pi, { store, promptSecret: h.promptSecret });
+
+  await h.run("setup");
+  assert.deepEqual(h.calls, ["confirm", "promptSecret"]);
+  assert.equal((await store.read())?.apiKey, "ts_typed_key");
 });
 
 test("logout clears the stored key", async () => {
