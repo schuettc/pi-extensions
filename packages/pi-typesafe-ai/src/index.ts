@@ -1,11 +1,14 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
-import { CredentialStore, resolveTypeSafeDir, validateApiKey } from "./credentials.ts";
+import { CredentialStore, resolveTypeSafeDir, TypeSafeConfigError, validateApiKey } from "./credentials.ts";
+import { JevClient } from "./client.ts";
 import { promptSecret as defaultPromptSecret } from "./masked-input.ts";
+import { BOX_WIDTH, TypeSafePanel, type ConnectionResult } from "./panel.ts";
 export * from "./credentials.ts";
 export * from "./client.ts";
 export * from "./bundle.ts";
 export { MaskedInput, promptSecret, type MaskedInputOptions } from "./masked-input.ts";
+export { BOX_WIDTH, renderBox, TypeSafePanel, type ConnectionResult, type PanelTheme, type TypeSafePanelOptions } from "./panel.ts";
 
 export const TYPESAFE_SUBCOMMANDS: readonly AutocompleteItem[] = [
   { value: "setup", label: "setup", description: "Store your TypeSafe API key (masked entry)" },
@@ -29,10 +32,24 @@ export function createTypeSafeExtension(pi: ExtensionAPI, deps: TypeSafeExtensio
   const store = deps.store ?? new CredentialStore({ dir: resolveTypeSafeDir() });
   const promptSecret = deps.promptSecret ?? defaultPromptSecret;
   pi.registerCommand("typesafe", {
-    description: "TypeSafe (Jev) API key: setup | status | logout",
+    description: "TypeSafe (Jev) settings; or setup | status | logout",
     getArgumentCompletions: typesafeArgumentCompletions,
     handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const sub = (args || "").trim().split(/\s+/)[0] || "status";
+      const sub = (args || "").trim().split(/\s+/)[0] || (ctx.hasUI ? "panel" : "status");
+      if (sub === "panel") {
+        await ctx.ui.custom<void>(
+          (tui, theme, _keybindings, done) => new TypeSafePanel({
+            store,
+            model: DEFAULT_MODEL,
+            testConnection: () => testConnection(store),
+            theme,
+            requestRender: () => tui.requestRender(),
+            onClose: () => done(undefined),
+          }),
+          { overlay: true, overlayOptions: { anchor: "center", width: BOX_WIDTH } },
+        );
+        return;
+      }
       if (sub === "status") {
         const s = await store.inspect();
         ctx.ui.notify(s.configured ? `TypeSafe key configured (${s.path})` : `TypeSafe key not configured (${s.path})${s.problem ? ` — ${s.problem}` : ""}`, s.configured ? "info" : "warning");
@@ -61,6 +78,28 @@ export function createTypeSafeExtension(pi: ExtensionAPI, deps: TypeSafeExtensio
       ctx.ui.notify("usage: /typesafe setup | status | logout", "warning");
     },
   });
+}
+
+const DEFAULT_MODEL = "jev-latest";
+
+// One tiny evaluation with the stored key. Reports only an error class, never
+// the error text, so nothing from the request (or the key) can be echoed.
+async function testConnection(store: CredentialStore): Promise<ConnectionResult> {
+  const client = new JevClient({ credentials: store, defaultModel: DEFAULT_MODEL, defaultTimeoutMs: 15_000 });
+  try {
+    const res = await client.evaluate(
+      { note: "Connectivity check from the /typesafe settings panel." },
+      { reachable: { type: "choice", instructions: "Is this a connectivity check?", criteria: { yes: "It is a connectivity check.", no: "It is something else." } } },
+    );
+    return { ok: true, latencyMs: res.latencyMs, ...(res.model ? { model: res.model } : {}) };
+  } catch (error) {
+    if (error instanceof TypeSafeConfigError) return { ok: false, reason: "no key stored" };
+    const status = (error as { status?: unknown })?.status;
+    if (status === 401 || status === 403) return { ok: false, reason: `HTTP ${status} (key rejected)` };
+    if (typeof status === "number") return { ok: false, reason: `HTTP ${status}` };
+    const name = (error as { name?: unknown })?.name;
+    return { ok: false, reason: /timeout|abort/i.test(String(name)) ? "timed out" : "could not reach TypeSafe" };
+  }
 }
 
 export default function (pi: ExtensionAPI): void { createTypeSafeExtension(pi); }
