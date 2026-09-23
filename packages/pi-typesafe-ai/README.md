@@ -27,8 +27,9 @@ from other pi extensions.
 
 Manage the TypeSafe API key from inside pi:
 
-- `/typesafe setup` — paste and store the API key. Input is **not masked**.
-  Prompts before replacing an existing key.
+- `/typesafe setup` — opens a **masked** field (characters are shown as `•`).
+  Paste your key, press enter to save or esc to cancel (ctrl+u clears).
+  Prompts before replacing an existing key. Requires the interactive pi TUI.
 - `/typesafe status` — report whether a key is configured and where it lives.
 - `/typesafe logout` — delete the stored key (prompts to confirm).
 
