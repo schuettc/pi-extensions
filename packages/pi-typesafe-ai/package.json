@@ -1,6 +1,6 @@
 {
   "name": "pi-typesafe-ai",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Generic TypeSafe (Jev / System One) capability for the pi coding agent: agent-owned credential storage, a thin SDK client, and a question-bundle helper.",
   "type": "module",
   "license": "MIT",
