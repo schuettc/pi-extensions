@@ -54,6 +54,12 @@ const ROWS: ReadonlyArray<{ id: RowId; label: string; help: string }> = [
   { id: "remove", label: "Remove key", help: "Delete the stored key. Jev calls fail closed until a new key is set." },
 ];
 const LABEL_WIDTH = 17;
+const HELP_WIDTH = BOX_WIDTH - 2 - PADDING * 2;
+// The body is always this tall, so the centered overlay never re-centers
+// (jumps) as descriptions wrap, messages come and go, or the view changes:
+// the rows, a blank, the longest description, a blank, one message line.
+const HELP_LINES = Math.max(...ROWS.map((row) => wrapTextWithAnsi(row.help, HELP_WIDTH).length));
+const BODY_LINES = ROWS.length + 1 + HELP_LINES + 2;
 
 export class TypeSafePanel implements Component {
   #opts: TypeSafePanelOptions;
@@ -93,15 +99,18 @@ export class TypeSafePanel implements Component {
         body.push(`${pointer}${active ? theme.fg("accent", label) : theme.fg("text", label)}${this.#value(row.id)}`);
       });
       body.push("");
-      for (const line of wrapTextWithAnsi(ROWS[this.#selected]!.help, BOX_WIDTH - 2 - PADDING * 2)) {
+      for (const line of wrapTextWithAnsi(ROWS[this.#selected]!.help, HELP_WIDTH)) {
         body.push(theme.fg("dim", line));
       }
     }
-    if (this.#message) {
-      body.push("", this.#message.kind === "ok"
+    const message = this.#message
+      ? this.#message.kind === "ok"
         ? theme.fg("success", `✓ ${this.#message.text}`)
-        : theme.fg("error", `✗ ${this.#message.text}`));
-    }
+        : theme.fg("error", `✗ ${this.#message.text}`)
+      : "";
+    while (body.length < BODY_LINES - 1) body.push("");
+    body.length = BODY_LINES - 1;
+    body.push(message);
     return renderBox({ title: "🔑 typesafe · Jev", body, footer: this.#footer(), width, theme });
   }
 

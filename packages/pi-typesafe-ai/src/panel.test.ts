@@ -117,3 +117,19 @@ test("remove key does nothing when no key is stored; navigation wraps within row
   assert.doesNotMatch(p.screen(), /y\/N/);
   assert.match(p.screen(), /no key is stored/i);
 });
+
+test("the box keeps one height across rows, messages and modes (no re-centering jump)", async () => {
+  const store = tempStore();
+  await store.write(KEY);
+  const p = await openPanel({ store, test: async () => ({ ok: false, reason: "HTTP 401 (key rejected)" }) });
+  const heights = new Set<number>();
+  const snap = () => heights.add(p.panel.render(100).length);
+  for (let i = 0; i < 4; i++) { snap(); await p.press(DOWN); }
+  await p.press(DOWN, DOWN, ENTER); snap();          // test result message
+  await p.press(DOWN, ENTER); snap();                // remove confirm
+  await p.press("n"); snap();                        // kept message
+  await p.press(DOWN, ENTER); snap();                // key entry
+  await p.press("a", " ", ENTER); snap();            // key entry + error
+  await p.press(ESC); snap();
+  assert.equal(heights.size, 1, `heights seen: ${[...heights].join(", ")}`);
+});
