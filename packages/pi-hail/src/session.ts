@@ -15,6 +15,9 @@ export type PhoneDecision = "allow" | "deny" | "defer";
 /** Which side owns the current turn. `idle` at rest. */
 export type Phase = "idle" | "local_turn" | "phone_turn";
 
+/** Status-line text while the daemon has this session hidden from phones. */
+export const HIDDEN_STATUS = "hidden from phone · /hail show";
+
 /** Status-line presence classification. */
 export type PresenceState = "connected" | "driving" | "offline";
 
@@ -38,6 +41,8 @@ export interface RegisterInput {
   work: string;
   dir: string;
   piVersion: string;
+  identity?: "hail" | "proj" | "fallback";
+  tmux?: { socket?: string; session?: string; pane?: string };
 }
 
 export class Session {
@@ -55,6 +60,10 @@ export class Session {
   private heldInput: string[] = [];
   /** Last-seen presence, for status-line idempotence. */
   private lastPresence: PresenceState = "offline";
+  /** True while the daemon reports this session hidden from phones. */
+  private hidden = false;
+  /** Last presence-derived status text, restored when the session is shown. */
+  private presenceText: string | undefined = undefined;
 
   /**
    * Permission gates the phone is being asked to answer, keyed by requestId.
@@ -80,9 +89,10 @@ export class Session {
     this.deps = deps;
   }
 
-  /** Stamps extensionVersion; passes identity through verbatim. */
+  /** Stamps extensionVersion; passes identity through verbatim. Optional
+   *  adoption facts are included only when present (older daemons ignore them). */
   buildRegisterArgs(input: RegisterInput): RegisterArgs {
-    return {
+    const args: RegisterArgs = {
       sessionId: input.sessionId,
       project: input.project,
       work: input.work,
@@ -90,6 +100,14 @@ export class Session {
       piVersion: input.piVersion,
       extensionVersion: EXTENSION_VERSION,
     };
+    if (input.identity) args.identity = input.identity;
+    if (input.tmux) {
+      args.tmux = true;
+      if (input.tmux.socket) args.tmuxSocket = input.tmux.socket;
+      if (input.tmux.session) args.tmuxSession = input.tmux.session;
+      if (input.tmux.pane) args.tmuxPane = input.tmux.pane;
+    }
+    return args;
   }
 
   /** Handles the register reply: stores replay cursor; refuses on mismatch. */
@@ -198,7 +216,21 @@ export class Session {
     }
     if ("presence" in m) {
       const presence = m.presence as { phones: Phone[] };
-      this.deps.ui.setStatus(presenceToStatus(presence.phones));
+      this.presenceText = presenceToStatus(presence.phones);
+      this.renderStatus();
+      return;
+    }
+    if ("visibility" in m) {
+      const v = m.visibility;
+      if (v === "hidden" || v === "visible") {
+        this.hidden = v === "hidden";
+        this.renderStatus();
+      } else if (v === "unavailable") {
+        this.deps.ui.notify(
+          "hail: this session isn't shared with your phone (only proj/tmux sessions can be shown or hidden).",
+          "info",
+        );
+      }
       return;
     }
     if ("answer" in m) {
@@ -238,6 +270,21 @@ export class Session {
       }
       this.pendingDecisions.set(requestId, resolve);
     });
+  }
+
+  /** Ask the daemon to show/hide this session on the phone. False when inert. */
+  requestVisibility(show: boolean): boolean {
+    if (!this.isActive) return false;
+    this.deps.send({ visibility: show ? "show" : "hide" });
+    return true;
+  }
+
+  private renderStatus(): void {
+    if (this.hidden) {
+      this.deps.ui.setStatus(HIDDEN_STATUS);
+      return;
+    }
+    if (this.presenceText !== undefined) this.deps.ui.setStatus(this.presenceText);
   }
 
   /** false after a version-mismatch refusal → inert. */

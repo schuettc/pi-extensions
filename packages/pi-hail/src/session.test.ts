@@ -24,6 +24,34 @@ test("buildRegisterArgs stamps extensionVersion and passes identity through", ()
   });
 });
 
+// Guards: adoption facts ride the register payload only when present; absent
+// facts are omitted so older daemons see exactly today's payload.
+test("buildRegisterArgs carries identity and tmux facts when present", () => {
+  const s = new Session(fakeDeps());
+  const args = s.buildRegisterArgs({
+    sessionId: "pi-7",
+    project: "bettor-help",
+    work: "contests",
+    dir: "/abs",
+    piVersion: "0.85.1",
+    identity: "proj",
+    tmux: { socket: "/private/tmp/tmux-501/proj-bettor-help", session: "bettor-help/contests", pane: "%3" },
+  });
+  assert.deepEqual(args, {
+    sessionId: "pi-7",
+    project: "bettor-help",
+    work: "contests",
+    dir: "/abs",
+    piVersion: "0.85.1",
+    extensionVersion: EXTENSION_VERSION,
+    identity: "proj",
+    tmux: true,
+    tmuxSocket: "/private/tmp/tmux-501/proj-bettor-help",
+    tmuxSession: "bettor-help/contests",
+    tmuxPane: "%3",
+  });
+});
+
 // Guards: every pi event reaches the phone verbatim, wrapped as { event }.
 test("forwardEvent wraps the pi event verbatim", () => {
   const deps = fakeDeps();
@@ -126,4 +154,52 @@ test("onInbound presence sets the status text", () => {
   const s = new Session(deps);
   s.onInbound({ presence: { phones: [{ deviceId: "p", name: "iPhone", state: "driving" }] } });
   assert.equal(deps.ui.setStatus.lastArg[0], "phone is working");
+});
+
+import type { SessionDeps } from "./session.ts";
+
+function recDeps() {
+  const sent: unknown[] = [];
+  const statuses: (string | undefined)[] = [];
+  const notes: string[] = [];
+  const deps: SessionDeps = {
+    send: (o) => sent.push(o),
+    sendUserMessage: () => {},
+    ui: { setStatus: (t) => statuses.push(t), notify: (m) => notes.push(m), holdInput: () => {} },
+    readSessionEvents: () => [],
+  };
+  return { deps, sent, statuses, notes };
+}
+
+// Guards: the pane always tells the truth about whether the phone can see it.
+test("visibility hidden overrides presence in the status line until visible", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+  s.onInbound({ presence: { phones: [{ deviceId: "p", name: "P", state: "connected" }] } });
+  s.onInbound({ visibility: "hidden" });
+  s.onInbound({ presence: { phones: [{ deviceId: "p", name: "P", state: "driving" }] } });
+  s.onInbound({ visibility: "visible" });
+  assert.deepEqual(r.statuses, [
+    "phone connected",
+    "hidden from phone · /hail show",
+    "hidden from phone · /hail show",
+    "phone is working",
+  ]);
+});
+
+test("visibility unavailable notifies and leaves the status alone", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+  s.onInbound({ visibility: "unavailable" });
+  assert.deepEqual(r.statuses, []);
+  assert.equal(r.notes.length, 1);
+  assert.match(r.notes[0], /isn't shared with your phone/);
+});
+
+test("requestVisibility sends show/hide frames", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+  assert.equal(s.requestVisibility(false), true);
+  assert.equal(s.requestVisibility(true), true);
+  assert.deepEqual(r.sent, [{ visibility: "hide" }, { visibility: "show" }]);
 });

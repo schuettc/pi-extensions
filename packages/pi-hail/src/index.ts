@@ -5,15 +5,17 @@
 // handler is best-effort (`safe()`), so nothing thrown ever escapes into pi and
 // a missing/slow daemon never blocks a turn.
 
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import type { PermissionsService } from "@gotgenes/pi-permission-system";
 import { DaemonSocket, realConnect, type Connect } from "./socket.ts";
 import { Session, type RegisterInput, type SessionDeps } from "./session.ts";
+import { deriveIdentity, type TmuxFacts } from "./identity.ts";
 import { readSessionEvents } from "./replay.ts";
 import { createPhoneAuthorizer } from "./authorizer.ts";
+import { runHailCommand } from "./command.ts";
 
 /** DI surface for tests: a fake socket, a fake permission service, an injected clock/timeout. */
 export interface ExtensionDeps {
@@ -21,6 +23,8 @@ export interface ExtensionDeps {
   socketPath?: string;
   getPermissionsService?: (sessionId: string) => PermissionsService | undefined;
   getTmuxSessionId?: () => string | undefined;
+  /** Test seam: tmux facts for this pane (defaults to one `tmux display-message`). */
+  getTmuxFacts?: () => TmuxFacts;
   timeoutMs?: number;
 }
 
@@ -38,28 +42,31 @@ function safe(fn: () => void | Promise<void>): void {
   }
 }
 
-// Read metadata from the current tmux pane without shell interpolation. A bare
-// terminal has no $TMUX and falls back to pi's own session/project identity.
-// Guarded so a test (or a machine without tmux) never has this throw or hang.
-function tmuxValue(format: string): string | undefined {
-  if (!process.env.TMUX) return undefined;
+// One `tmux display-message` for every fact, targeted at this pane when tmux
+// exported TMUX_PANE. A bare terminal (no $TMUX) reports inTmux:false. Guarded
+// so a test (or a machine without tmux) never throws or hangs.
+const FACTS_FORMAT = "#{@hail_session}\t#{session_name}\t#{window_name}\t#{socket_path}\t#{pane_id}";
+
+function readTmuxFacts(): TmuxFacts {
+  if (!process.env.TMUX) return { inTmux: false };
+  const argv = ["display-message", "-p"];
+  if (process.env.TMUX_PANE) argv.push("-t", process.env.TMUX_PANE);
+  argv.push(FACTS_FORMAT);
   try {
-    const out = execFileSync("tmux", ["display-message", "-p", format], {
-      encoding: "utf8",
-      timeout: 1000,
-    }).trim();
-    return out.length > 0 ? out : undefined;
+    const out = execFileSync("tmux", argv, { encoding: "utf8", timeout: 1000 }).replace(/\n$/, "");
+    const [hail, session, window, socket, pane] = out.split("\t");
+    const opt = (v: string | undefined) => (v && v.length > 0 ? v : undefined);
+    return {
+      inTmux: true,
+      hailSession: opt(hail),
+      sessionName: opt(session),
+      windowName: opt(window),
+      socketPath: opt(socket),
+      paneId: opt(pane),
+    };
   } catch {
-    return undefined;
+    return { inTmux: true };
   }
-}
-
-function tmuxWindowName(): string | undefined {
-  return tmuxValue("#{window_name}");
-}
-
-function tmuxHailSessionId(): string | undefined {
-  return tmuxValue("#{@hail_session}");
 }
 
 // Resolve the loaded pi build's version for the C6 handshake. The package.json
@@ -179,15 +186,23 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         };
       };
 
-      const hailSessionId = deps.getTmuxSessionId
-        ? deps.getTmuxSessionId()
-        : tmuxHailSessionId();
-      const sessionId = hailSessionId ?? String(c.sessionManager.getSessionId());
+      const facts = deps.getTmuxFacts ? deps.getTmuxFacts() : readTmuxFacts();
+      // Back-compat test seam: an injected @hail_session id overrides the facts.
+      if (deps.getTmuxSessionId) facts.hailSession = deps.getTmuxSessionId();
       const dir = c.cwd;
-      const project = basename(dir);
-      const work = tmuxWindowName() ?? basename(dir);
+      const id = deriveIdentity(facts, String(c.sessionManager.getSessionId()), dir);
       const piVersion = resolvePiVersion();
-      registerInput = { sessionId, project, work, dir, piVersion };
+      registerInput = {
+        sessionId: id.sessionId,
+        project: id.project,
+        work: id.work,
+        dir,
+        piVersion,
+        identity: id.identity,
+        ...(facts.inTmux
+          ? { tmux: { socket: facts.socketPath, session: facts.sessionName, pane: facts.paneId } }
+          : {}),
+      };
 
       const sessionDeps: SessionDeps = {
         send: (obj) => socket?.send(obj),
@@ -218,6 +233,18 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       register();
     }),
   );
+
+  pi.registerCommand("hail", {
+    description: "Show or hide this session on your phone (show | hide)",
+    handler: async (args: string, cmdCtx: unknown) => {
+      try {
+        const c = cmdCtx as { ui?: { notify?: (m: string, l: string) => void } } | undefined;
+        runHailCommand(args ?? "", ownsThisPane ? session : undefined, (m) => c?.ui?.notify?.(m, "info"));
+      } catch {
+        // Never let a command handler throw into pi.
+      }
+    },
+  });
 
   // Turn lifecycle is emitted ONLY as a {turn} frame (never also as a forwarded
   // {event}); a duplicate {event} turn rpc would make the daemon rotate the

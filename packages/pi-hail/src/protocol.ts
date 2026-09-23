@@ -18,6 +18,13 @@ export interface RegisterArgs {
   dir: string;
   piVersion: string;
   extensionVersion: string;
+  /** Which identity rule produced project/work (spec §4.1). Omitted by 0.1.x. */
+  identity?: "hail" | "proj" | "fallback";
+  /** Present (true) only when the session is tmux-hosted. */
+  tmux?: boolean;
+  tmuxSocket?: string;
+  tmuxSession?: string;
+  tmuxPane?: string;
 }
 
 /** Daemon's reply to `session.register`. */
@@ -39,14 +46,16 @@ export type Outbound =
   | { turn: "start" | "end" }
   | { lock: "held" | "released" }
   | { exit: { code: number } }
-  | { refused: { requestId: string; reason: "turn_running" } };
+  | { refused: { requestId: string; reason: "turn_running" } }
+  | { visibility: "show" | "hide" };
 
 /** Daemon → extension, one JSON object per line after register. */
 export type Inbound =
   | { prompt: { text: string; from: string; requestId: string } }
   | { presence: { phones: Phone[] } }
   | { answer: { requestId: string; value: unknown } }
-  | { ctl: "stop" };
+  | { ctl: "stop" }
+  | { visibility: "visible" | "hidden" | "unavailable" };
 
 /** Serialize an object to a single NDJSON line (JSON + trailing newline). */
 export function encodeLine(obj: unknown): string {
