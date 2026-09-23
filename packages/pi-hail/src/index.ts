@@ -15,6 +15,7 @@ import { Session, type RegisterInput, type SessionDeps } from "./session.ts";
 import { deriveIdentity, type TmuxFacts } from "./identity.ts";
 import { readSessionEvents } from "./replay.ts";
 import { createPhoneAuthorizer } from "./authorizer.ts";
+import { runHailCommand } from "./command.ts";
 
 /** DI surface for tests: a fake socket, a fake permission service, an injected clock/timeout. */
 export interface ExtensionDeps {
@@ -232,6 +233,18 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       register();
     }),
   );
+
+  pi.registerCommand("hail", {
+    description: "Show or hide this session on your phone (show | hide)",
+    handler: async (args: string, cmdCtx: unknown) => {
+      try {
+        const c = cmdCtx as { ui?: { notify?: (m: string, l: string) => void } } | undefined;
+        runHailCommand(args ?? "", ownsThisPane ? session : undefined, (m) => c?.ui?.notify?.(m, "info"));
+      } catch {
+        // Never let a command handler throw into pi.
+      }
+    },
+  });
 
   // Turn lifecycle is emitted ONLY as a {turn} frame (never also as a forwarded
   // {event}); a duplicate {event} turn rpc would make the daemon rotate the

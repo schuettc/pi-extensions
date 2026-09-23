@@ -46,14 +46,16 @@ export type Outbound =
   | { turn: "start" | "end" }
   | { lock: "held" | "released" }
   | { exit: { code: number } }
-  | { refused: { requestId: string; reason: "turn_running" } };
+  | { refused: { requestId: string; reason: "turn_running" } }
+  | { visibility: "show" | "hide" };
 
 /** Daemon → extension, one JSON object per line after register. */
 export type Inbound =
   | { prompt: { text: string; from: string; requestId: string } }
   | { presence: { phones: Phone[] } }
   | { answer: { requestId: string; value: unknown } }
-  | { ctl: "stop" };
+  | { ctl: "stop" }
+  | { visibility: "visible" | "hidden" | "unavailable" };
 
 /** Serialize an object to a single NDJSON line (JSON + trailing newline). */
 export function encodeLine(obj: unknown): string {

@@ -14,6 +14,15 @@ Add the extension to `~/.pi/agent/settings.json`:
 
 The extension loads on every pi session but is inert unless it owns an interactive TUI pane and the hail daemon is running. A missing or slow daemon never blocks pi.
 
+## Phone visibility (0.2.0)
+
+Sessions running inside tmux under proj's `project/work` naming are shared with
+your phone automatically. The status line shows `hidden from phone · /hail show`
+when you (or your phone) have hidden the session.
+
+- `/hail hide` — hide this session from your phone (pi keeps running).
+- `/hail show` — show it again, with its history intact.
+
 ## Wire protocol (C4 summary)
 
 One long-lived newline-delimited JSON (NDJSON) connection per pi process, to the daemon's Unix control socket at `$XDG_RUNTIME_DIR/hail/daemon.sock` (falling back to `$TMPDIR/hail/daemon.sock` on macOS). One JSON object per line.

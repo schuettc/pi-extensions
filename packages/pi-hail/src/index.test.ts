@@ -58,6 +58,7 @@ function makeFakePi() {
       },
     },
     sendUserMessage: (t: string) => sendUserMessage(t),
+    registerCommand: () => {},
   };
   return {
     pi,
