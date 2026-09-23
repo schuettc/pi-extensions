@@ -17,7 +17,7 @@ reviewer) build on top of it.
 ## Install
 
 ```
-pi install npm:pi-typesafe
+pi install npm:pi-typesafe-ai
 ```
 
 This registers a `/typesafe` command and exports a small library you can import
@@ -25,10 +25,13 @@ from other pi extensions.
 
 ## Commands
 
-Manage the TypeSafe API key from inside pi:
+Manage the TypeSafe API key from inside pi. Typing `/typesafe ` (with the
+trailing space) autocompletes the subcommands below, each with a short
+description:
 
-- `/typesafe setup` — paste and store the API key. Input is **not masked**.
-  Prompts before replacing an existing key.
+- `/typesafe setup` — opens a **masked** field (characters are shown as `•`).
+  Paste your key, press enter to save or esc to cancel (ctrl+u clears).
+  Prompts before replacing an existing key. Requires the interactive pi TUI.
 - `/typesafe status` — report whether a key is configured and where it lives.
 - `/typesafe logout` — delete the stored key (prompts to confirm).
 
@@ -38,7 +41,7 @@ fallback when no key has been stored.
 ## Library
 
 ```ts
-import { CredentialStore, JevClient, evaluateBundle, type Bundle } from "pi-typesafe";
+import { CredentialStore, JevClient, evaluateBundle, type Bundle } from "pi-typesafe-ai";
 
 // Agent-owned credential file at <pi agent dir>/typesafe/config.json.
 const credentials = new CredentialStore({ dir: resolveTypeSafeDir() });
