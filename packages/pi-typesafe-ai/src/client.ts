@@ -3,7 +3,7 @@ import { CredentialStore, TypeSafeConfigError } from "./credentials.ts";
 
 export type { ChoiceResponse, ScoreResponse, NoulResponse, SystemOneResult, Questions } from "@typesafe-ai/sdk";
 
-type SystemOneLike = (req: { state: unknown; questions: unknown; model: string }) => Promise<{ answers: Record<string, unknown>; usage?: unknown }>;
+type SystemOneLike = (req: { state: unknown; questions: unknown; model: string }) => Promise<{ answers: Record<string, unknown>; usage?: unknown; model?: string }>;
 
 export interface JevClientOptions {
   credentials: CredentialStore;
@@ -45,7 +45,7 @@ export class JevClient {
     try { return (await this.resolveKey()) !== undefined; } catch { return false; }
   }
 
-  async evaluate(state: unknown, questions: unknown, opts: { model?: string; timeoutMs?: number } = {}): Promise<{ answers: Record<string, unknown>; usage?: unknown; latencyMs: number }> {
+  async evaluate(state: unknown, questions: unknown, opts: { model?: string; timeoutMs?: number } = {}): Promise<{ answers: Record<string, unknown>; usage?: unknown; latencyMs: number; model?: string }> {
     const apiKey = await this.resolveKey();
     if (!apiKey) throw new TypeSafeConfigError("no TypeSafe API key configured (run /typesafe setup)");
     // Construct per call: the key + timeout are resolved fresh each call, so a
@@ -53,6 +53,7 @@ export class JevClient {
     const client = this.clientFactory({ apiKey, timeout: opts.timeoutMs ?? this.defaultTimeoutMs, baseURL: this.baseURL });
     const started = Date.now();
     const res = await client.systemOne({ state, questions, model: opts.model ?? this.defaultModel });
-    return { answers: res.answers, usage: res.usage, latencyMs: Date.now() - started };
+    // `model` is the versioned id that answered (an alias like jev-latest resolves to it).
+    return { answers: res.answers, usage: res.usage, latencyMs: Date.now() - started, ...(res.model ? { model: res.model } : {}) };
   }
 }

@@ -25,9 +25,21 @@ from other pi extensions.
 
 ## Commands
 
-Manage the TypeSafe API key from inside pi. Typing `/typesafe ` (with the
-trailing space) autocompletes the subcommands below, each with a short
-description:
+Type **`/typesafe`** on its own to open the settings panel: a bordered box
+with four rows.
+- **API key:** `configured` or `not set`. Enter opens a masked field inside the
+  box; the key is never shown.
+- **Model:** the default model. After a test it also shows the exact version
+  that answered, e.g. `jev-latest → jev-1.13.0`.
+- **Test connection:** runs one tiny Jev evaluation and shows the latency, or
+  a short reason such as `HTTP 401 (key rejected)`.
+- **Remove key:** deletes the stored key after a `y/N` prompt.
+
+Use ↑↓ (or j/k) to move, enter or space to act, and esc to close. Without the
+interactive TUI, a bare `/typesafe` reports status instead.
+
+The subcommands still work. Typing `/typesafe ` (with the trailing space)
+autocompletes them, each with a short description:
 
 - `/typesafe setup` — opens a **masked** field (characters are shown as `•`).
   Paste your key, press enter to save or esc to cancel (ctrl+u clears).
@@ -71,7 +83,10 @@ const { value } = await evaluateBundle(client, bundle, { text: "hi" });
 - **`validateApiKey(value)`** — validation helper used by the command.
 - **`JevClient`** — thin wrapper over `@typesafe-ai/sdk`'s System One endpoint;
   resolves the key (stored or env), applies a timeout, and returns
-  `{ answers, usage, latencyMs }`.
+  `{ answers, usage, latencyMs, model? }`; `model` is the versioned id that
+  answered.
+- **`TypeSafePanel` / `renderBox`**: the settings panel and its bordered-box
+  renderer.
 - **`Bundle<T>` / `evaluateBundle`** — bundle a fixed set of questions with a
   `map` function that turns the typed answers into your own value.
 

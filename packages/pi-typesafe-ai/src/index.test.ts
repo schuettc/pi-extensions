@@ -128,8 +128,32 @@ test("registered /typesafe command exposes getArgumentCompletions", async () => 
   const h = harness();
   createTypeSafeExtension(h.pi, { store: tempStore(), promptSecret: h.promptSecret });
   const cmd = h.commands.get("typesafe")!;
-  assert.equal(cmd.description, "TypeSafe (Jev) API key: setup | status | logout");
+  assert.equal(cmd.description, "TypeSafe (Jev) settings; or setup | status | logout");
   assert.equal(typeof cmd.getArgumentCompletions, "function");
   const items = await cmd.getArgumentCompletions!("sta");
   assert.deepEqual(items?.map((i) => i.value), ["status"]);
+});
+
+test("bare /typesafe opens the settings panel as a centered overlay", async () => {
+  const commands = new Map<string, CommandOptions>();
+  const pi = { registerCommand: (name: string, options: CommandOptions) => { commands.set(name, options); } } as unknown as ExtensionAPI;
+  createTypeSafeExtension(pi, { store: tempStore() });
+  const seen: Array<Record<string, unknown> | undefined> = [];
+  const ui = {
+    notify: () => { throw new Error("bare /typesafe with a UI should open the panel, not notify"); },
+    custom: async (_factory: unknown, options?: Record<string, unknown>) => { seen.push(options); return undefined; },
+  };
+  await commands.get("typesafe")!.handler("", { hasUI: true, ui } as unknown as ExtensionCommandContext);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.overlay, true);
+  assert.equal((seen[0]?.overlayOptions as Record<string, unknown>)?.anchor, "center");
+});
+
+test("bare /typesafe without a UI reports status", async () => {
+  const h = harness();
+  createTypeSafeExtension(h.pi, { store: tempStore(), promptSecret: h.promptSecret });
+  const commands = h.commands;
+  const notes: string[] = [];
+  await commands.get("typesafe")!.handler("", { hasUI: false, ui: { notify: (m: string) => { notes.push(m); } } } as unknown as ExtensionCommandContext);
+  assert.match(notes.at(-1) ?? "", /not configured/i);
 });
