@@ -18,6 +18,13 @@ export interface RegisterArgs {
   dir: string;
   piVersion: string;
   extensionVersion: string;
+  /** Which identity rule produced project/work (spec §4.1). Omitted by 0.1.x. */
+  identity?: "hail" | "proj" | "fallback";
+  /** Present (true) only when the session is tmux-hosted. */
+  tmux?: boolean;
+  tmuxSocket?: string;
+  tmuxSession?: string;
+  tmuxPane?: string;
 }
 
 /** Daemon's reply to `session.register`. */

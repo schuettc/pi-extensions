@@ -24,6 +24,34 @@ test("buildRegisterArgs stamps extensionVersion and passes identity through", ()
   });
 });
 
+// Guards: adoption facts ride the register payload only when present; absent
+// facts are omitted so older daemons see exactly today's payload.
+test("buildRegisterArgs carries identity and tmux facts when present", () => {
+  const s = new Session(fakeDeps());
+  const args = s.buildRegisterArgs({
+    sessionId: "pi-7",
+    project: "bettor-help",
+    work: "contests",
+    dir: "/abs",
+    piVersion: "0.85.1",
+    identity: "proj",
+    tmux: { socket: "/private/tmp/tmux-501/proj-bettor-help", session: "bettor-help/contests", pane: "%3" },
+  });
+  assert.deepEqual(args, {
+    sessionId: "pi-7",
+    project: "bettor-help",
+    work: "contests",
+    dir: "/abs",
+    piVersion: "0.85.1",
+    extensionVersion: EXTENSION_VERSION,
+    identity: "proj",
+    tmux: true,
+    tmuxSocket: "/private/tmp/tmux-501/proj-bettor-help",
+    tmuxSession: "bettor-help/contests",
+    tmuxPane: "%3",
+  });
+});
+
 // Guards: every pi event reaches the phone verbatim, wrapped as { event }.
 test("forwardEvent wraps the pi event verbatim", () => {
   const deps = fakeDeps();

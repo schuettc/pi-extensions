@@ -38,6 +38,8 @@ export interface RegisterInput {
   work: string;
   dir: string;
   piVersion: string;
+  identity?: "hail" | "proj" | "fallback";
+  tmux?: { socket?: string; session?: string; pane?: string };
 }
 
 export class Session {
@@ -80,9 +82,10 @@ export class Session {
     this.deps = deps;
   }
 
-  /** Stamps extensionVersion; passes identity through verbatim. */
+  /** Stamps extensionVersion; passes identity through verbatim. Optional
+   *  adoption facts are included only when present (older daemons ignore them). */
   buildRegisterArgs(input: RegisterInput): RegisterArgs {
-    return {
+    const args: RegisterArgs = {
       sessionId: input.sessionId,
       project: input.project,
       work: input.work,
@@ -90,6 +93,14 @@ export class Session {
       piVersion: input.piVersion,
       extensionVersion: EXTENSION_VERSION,
     };
+    if (input.identity) args.identity = input.identity;
+    if (input.tmux) {
+      args.tmux = true;
+      if (input.tmux.socket) args.tmuxSocket = input.tmux.socket;
+      if (input.tmux.session) args.tmuxSession = input.tmux.session;
+      if (input.tmux.pane) args.tmuxPane = input.tmux.pane;
+    }
+    return args;
   }
 
   /** Handles the register reply: stores replay cursor; refuses on mismatch. */

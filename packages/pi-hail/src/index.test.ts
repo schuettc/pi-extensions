@@ -4,6 +4,13 @@ import { EventEmitter } from "node:events";
 import { createExtension } from "./index.ts";
 import type { Duplex } from "./socket.ts";
 
+// These cases model a pi started in a bare terminal (no tmux): identity falls
+// back to cwd basename unless a test injects @hail_session via getTmuxSessionId.
+// The worker/CI shell may itself run inside tmux, so clear $TMUX here to keep
+// readTmuxFacts() deterministic (inTmux:false) — matching the brief's premise.
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
+
 /** In-process fake Duplex (same shape as socket.test.ts): captures writes; lets a test push `data`. */
 class FakeDuplex extends EventEmitter implements Duplex {
   writes: string[] = [];
