@@ -1,0 +1,36 @@
+{
+  "name": "pi-auto-reload",
+  "version": "0.1.0",
+  "description": "Reload a pi session automatically, when idle, after the installed pi packages change (e.g. after kempt update or pi update).",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schuettc/pi-extensions.git",
+    "directory": "packages/pi-auto-reload"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "reload",
+    "updates"
+  ],
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.87.0",
+    "typescript": "^5.6.0"
+  }
+}
