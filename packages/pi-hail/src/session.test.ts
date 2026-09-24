@@ -276,6 +276,38 @@ test("round trip: live cursors 1,2,3 then resend from 2 replays exactly the 3rd"
   ]);
 });
 
+// Guards: a bashExecution entry (persisted by pi WITHOUT a message_end emit, so
+// never streamed live) sits between two live messages. Live and replay cursors
+// must agree \u2014 no duplicate, and no live-visible message skipped.
+test("round trip: a bash entry between live messages \u2014 live and replay cursors agree", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+
+  // message 1 (assistant) streams live at cursor 1, then pi persists it.
+  const m1 = { role: "assistant", content: [{ type: "text", text: "m1" }] };
+  s.forwardEvent({ type: "message_end", message: m1 });
+  r.entries.push({ type: "message", message: m1 });
+  // pi flushes a bash entry (no message_end emit) \u2014 appended to entries only.
+  r.entries.push({ type: "message", message: { role: "bashExecution", content: [] } });
+  // message 2 (assistant) streams live at cursor 3, then pi persists it.
+  const m2 = { role: "assistant", content: [{ type: "text", text: "m2" }] };
+  s.forwardEvent({ type: "message_end", message: m2 });
+  r.entries.push({ type: "message", message: m2 });
+
+  const liveCursors = r.sent
+    .map((f) => (f as { cursor?: number }).cursor)
+    .filter((c): c is number => c !== undefined);
+  assert.deepEqual(liveCursors, [1, 3]); // bash never streamed live
+
+  // Resend from the 1st message's cursor replays EXACTLY m2 at the same cursor 3.
+  r.sent.length = 0;
+  s.onInbound({ resend: { since: 1 } });
+  assert.deepEqual(r.sent, [
+    { event: { type: "message_end", message: m2 }, replay: true, cursor: 3 },
+    { resend: "done" },
+  ]);
+});
+
 // Guards (d): the register cursor is getEntries().length, threaded through
 // buildRegisterArgs so the daemon seeds a fresh slot to the pane's position.
 test("buildRegisterArgs threads the register cursor (getEntries().length)", () => {
