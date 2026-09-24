@@ -25,6 +25,10 @@ export interface RegisterArgs {
   tmuxSocket?: string;
   tmuxSession?: string;
   tmuxPane?: string;
+  /** The pane's current in-memory entry count (sessionManager.getEntries().length),
+   *  reported so the daemon can initialize its cursor on first registration
+   *  (streaming spec §4.1). */
+  cursor?: number;
 }
 
 /** Daemon's reply to `session.register`. */
@@ -42,12 +46,13 @@ export type RegisterReply =
 
 /** Extension → daemon, one JSON object per line after register. */
 export type Outbound =
-  | { event: unknown }
+  | { event: unknown; cursor?: number; replay?: boolean }
   | { turn: "start" | "end" }
   | { lock: "held" | "released" }
   | { exit: { code: number } }
   | { refused: { requestId: string; reason: "turn_running" } }
-  | { visibility: "show" | "hide" };
+  | { connection: "connect" | "disconnect" }
+  | { resend: "done" };
 
 /** Daemon → extension, one JSON object per line after register. */
 export type Inbound =
@@ -55,7 +60,8 @@ export type Inbound =
   | { presence: { phones: Phone[] } }
   | { answer: { requestId: string; value: unknown } }
   | { ctl: "stop" }
-  | { visibility: "visible" | "hidden" | "unavailable" };
+  | { connection: "connected" | "disconnected" | "unavailable" }
+  | { resend: { since: number } };
 
 /** Serialize an object to a single NDJSON line (JSON + trailing newline). */
 export function encodeLine(obj: unknown): string {

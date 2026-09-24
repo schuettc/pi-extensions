@@ -6,6 +6,7 @@
 
 import type { PromptPermissionDetails } from "@gotgenes/pi-permission-system";
 import type { Phone, RegisterArgs, RegisterReply } from "./protocol.ts";
+import { entriesAfter, PERSISTED_ROLES } from "./replay.ts";
 import { presenceToStatus } from "./status.ts";
 import { EXTENSION_VERSION } from "./version.ts";
 
@@ -15,8 +16,8 @@ export type PhoneDecision = "allow" | "deny" | "defer";
 /** Which side owns the current turn. `idle` at rest. */
 export type Phase = "idle" | "local_turn" | "phone_turn";
 
-/** Status-line text while the daemon has this session hidden from phones. */
-export const HIDDEN_STATUS = "hidden from phone · /hail show";
+/** Status-line text while the daemon has this session disconnected from phones. */
+export const CONNECTION_STATUS_DISCONNECTED = "hail: disconnected · /hail connect";
 
 /** Status-line presence classification. */
 export type PresenceState = "connected" | "driving" | "offline";
@@ -31,8 +32,14 @@ export interface SessionDeps {
     notify: (msg: string, level?: "info" | "warning" | "error") => void;
     holdInput: (held: boolean) => void;
   };
-  /** replay source (Task 7) */
-  readSessionEvents: (sinceSeq: number) => unknown[];
+  /**
+   * pi's IN-MEMORY entry list (ctx.sessionManager.getEntries(), which excludes
+   * the "session" header). The cursor unit is an index into this list; it is the
+   * catch-up source (streaming spec §4.3). We never read pi's session FILE:
+   * message_end fires before appendMessage persists, and the file is written
+   * lazily, so a file-line count is one short and unreliable early.
+   */
+  getEntries: () => unknown[];
 }
 
 export interface RegisterInput {
@@ -43,6 +50,8 @@ export interface RegisterInput {
   piVersion: string;
   identity?: "hail" | "proj" | "fallback";
   tmux?: { socket?: string; session?: string; pane?: string };
+  /** The pane's current session-file position (streaming spec §4.1). */
+  cursor?: number;
 }
 
 export class Session {
@@ -60,8 +69,8 @@ export class Session {
   private heldInput: string[] = [];
   /** Last-seen presence, for status-line idempotence. */
   private lastPresence: PresenceState = "offline";
-  /** True while the daemon reports this session hidden from phones. */
-  private hidden = false;
+  /** True while the daemon reports this session disconnected from phones. */
+  private disconnected = false;
   /** Last presence-derived status text, restored when the session is shown. */
   private presenceText: string | undefined = undefined;
 
@@ -107,23 +116,17 @@ export class Session {
       if (input.tmux.session) args.tmuxSession = input.tmux.session;
       if (input.tmux.pane) args.tmuxPane = input.tmux.pane;
     }
+    if (input.cursor !== undefined) args.cursor = input.cursor;
     return args;
   }
 
   /** Handles the register reply: stores replay cursor; refuses on mismatch. */
   onRegisterReply(reply: RegisterReply): void {
     if (reply.ok) {
+      // Stored for diagnostics only: the daemon now drives catch-up via a
+      // {"resend":{since}} frame (streaming spec §4.3), so registration no
+      // longer replays here.
       this.have = reply.data.have;
-      // A reconnect (not the first register): replay pi's own session-file
-      // events after the daemon's `have` cursor so device sequence numbers stay
-      // continuous, BEFORE live forwarding resumes. First-connect skips replay.
-      if (this.hasRegistered) {
-        const events = this.deps.readSessionEvents(this.have ?? 0);
-        for (const event of events) {
-          // Wrap each entry exactly as live forwarding does: send({ event }).
-          this.deps.send({ event });
-        }
-      }
       this.hasRegistered = true;
       return;
     }
@@ -138,9 +141,23 @@ export class Session {
     }
   }
 
-  /** Forward a pi event verbatim, wrapped as { event }. */
+  /**
+   * Forward a pi event verbatim, wrapped as { event }. A completed message that
+   * pi WILL persist is tagged with cursor = getEntries().length + 1 — the
+   * entry's final 1-based position. This runs at message_end, BEFORE pi's
+   * appendMessage, so getEntries() is one short and the +1 lands on the entry's
+   * eventual slot. Non-persisted roles, and tool_execution_end, carry NO cursor.
+   */
   forwardEvent(piEvent: unknown): void {
     if (!this.isActive) return;
+    const e = piEvent as { type?: string; message?: { role?: string } } | null;
+    if (e?.type === "message_end") {
+      const role = e.message?.role;
+      if (role !== undefined && PERSISTED_ROLES.has(role)) {
+        this.deps.send({ event: piEvent, cursor: this.deps.getEntries().length + 1 });
+        return;
+      }
+    }
     this.deps.send({ event: piEvent });
   }
 
@@ -220,17 +237,22 @@ export class Session {
       this.renderStatus();
       return;
     }
-    if ("visibility" in m) {
-      const v = m.visibility;
-      if (v === "hidden" || v === "visible") {
-        this.hidden = v === "hidden";
+    if ("connection" in m) {
+      const v = m.connection;
+      if (v === "connected" || v === "disconnected") {
+        this.disconnected = v === "disconnected";
         this.renderStatus();
       } else if (v === "unavailable") {
         this.deps.ui.notify(
-          "hail: this session isn't shared with your phone (only proj/tmux sessions can be shown or hidden).",
+          "hail: this session isn't shared with your phone (only proj/tmux sessions can connect).",
           "info",
         );
       }
+      return;
+    }
+    if ("resend" in m) {
+      const since = (m.resend as { since?: number }).since ?? 0;
+      this.onResend(since);
       return;
     }
     if ("answer" in m) {
@@ -272,16 +294,29 @@ export class Session {
     });
   }
 
-  /** Ask the daemon to show/hide this session on the phone. False when inert. */
-  requestVisibility(show: boolean): boolean {
+  /** Ask the daemon to connect/disconnect this session. False when inert. */
+  requestConnection(connect: boolean): boolean {
     if (!this.isActive) return false;
-    this.deps.send({ visibility: show ? "show" : "hide" });
+    this.deps.send({ connection: connect ? "connect" : "disconnect" });
     return true;
   }
 
+  /**
+   * Replay completed message entries after `since` at catch-up priority. Each
+   * replay frame carries its absolute cursor (since + i + 1) so the daemon
+   * records where it left off; the trailing { resend:"done" } flushes its hold.
+   */
+  onResend(since: number): void {
+    if (!this.isActive) return;
+    for (const { event, cursor } of entriesAfter(this.deps.getEntries(), since)) {
+      this.deps.send({ event, replay: true, cursor });
+    }
+    this.deps.send({ resend: "done" });
+  }
+
   private renderStatus(): void {
-    if (this.hidden) {
-      this.deps.ui.setStatus(HIDDEN_STATUS);
+    if (this.disconnected) {
+      this.deps.ui.setStatus(CONNECTION_STATUS_DISCONNECTED);
       return;
     }
     if (this.presenceText !== undefined) this.deps.ui.setStatus(this.presenceText);

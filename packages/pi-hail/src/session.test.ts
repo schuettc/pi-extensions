@@ -115,26 +115,19 @@ test("phone turn emits lock held on start and released on end", () => {
   assert.deepEqual(deps.send.calls[3][0], { lock: "released" });
 });
 
-// Guards: after a daemon restart, replay backfills the gap; a first connect must NOT replay (no double-send).
-test("a reconnect register reply replays events; a first-connect reply does not", () => {
+// Guards: register no longer replays \u2014 the daemon drives catch-up via a
+// {"resend":{since}} frame (streaming spec \u00a74.3). Neither a first-connect nor a
+// reconnect register reply sends anything.
+test("register reply never replays (catch-up is driven by resend)", () => {
   const deps = fakeDeps();
-  const replayed = [
-    { type: "turn_start" },
-    { type: "message_start", id: "m9" },
-  ];
-  // Stub the replay source to return known entries regardless of cursor.
-  deps.readSessionEvents = (_sinceSeq: number): unknown[] => replayed;
+  deps.getEntries = (): unknown[] => [{ type: "message", message: { role: "assistant" } }];
   const s = new Session(deps);
 
-  // First connect: stores `have`, does not replay.
   s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.3.0", accepted: true, have: 2 } });
   assert.equal(deps.send.calls.length, 0);
 
-  // Reconnect: replays each returned entry as a live { event } frame, in order.
   s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.3.0", accepted: true, have: 5 } });
-  assert.equal(deps.send.calls.length, replayed.length);
-  assert.deepEqual(deps.send.calls[0][0], { event: { type: "turn_start" } });
-  assert.deepEqual(deps.send.calls[1][0], { event: { type: "message_start", id: "m9" } });
+  assert.equal(deps.send.calls.length, 0);
 });
 
 // Guards: a version mismatch is one plain sentence in pi and then silence — never a silent downstream failure (C6, spec §7).
@@ -162,44 +155,172 @@ function recDeps() {
   const sent: unknown[] = [];
   const statuses: (string | undefined)[] = [];
   const notes: string[] = [];
-  const deps: SessionDeps = {
+  const r = {
+    sent,
+    statuses,
+    notes,
+    // pi's in-memory entry list (sessionManager.getEntries()); the cursor unit.
+    entries: [] as unknown[],
+    deps: undefined as unknown as SessionDeps,
+  };
+  r.deps = {
     send: (o) => sent.push(o),
     sendUserMessage: () => {},
     ui: { setStatus: (t) => statuses.push(t), notify: (m) => notes.push(m), holdInput: () => {} },
-    readSessionEvents: () => [],
+    getEntries: () => r.entries,
   };
-  return { deps, sent, statuses, notes };
+  return r;
 }
 
 // Guards: the pane always tells the truth about whether the phone can see it.
-test("visibility hidden overrides presence in the status line until visible", () => {
+test("connection disconnected overrides presence until connected", () => {
   const r = recDeps();
   const s = new Session(r.deps);
   s.onInbound({ presence: { phones: [{ deviceId: "p", name: "P", state: "connected" }] } });
-  s.onInbound({ visibility: "hidden" });
-  s.onInbound({ presence: { phones: [{ deviceId: "p", name: "P", state: "driving" }] } });
-  s.onInbound({ visibility: "visible" });
-  assert.deepEqual(r.statuses, [
-    "phone connected",
-    "hidden from phone · /hail show",
-    "hidden from phone · /hail show",
-    "phone is working",
-  ]);
+  s.onInbound({ connection: "disconnected" });
+  s.onInbound({ connection: "connected" });
+  assert.deepEqual(r.statuses, ["phone connected", "hail: disconnected · /hail connect", "phone connected"]);
 });
 
-test("visibility unavailable notifies and leaves the status alone", () => {
+test("connection unavailable notifies and leaves the status alone", () => {
   const r = recDeps();
   const s = new Session(r.deps);
-  s.onInbound({ visibility: "unavailable" });
+  s.onInbound({ connection: "unavailable" });
   assert.deepEqual(r.statuses, []);
   assert.equal(r.notes.length, 1);
   assert.match(r.notes[0], /isn't shared with your phone/);
 });
 
-test("requestVisibility sends show/hide frames", () => {
+test("requestConnection sends connect/disconnect frames", () => {
   const r = recDeps();
   const s = new Session(r.deps);
-  assert.equal(s.requestVisibility(false), true);
-  assert.equal(s.requestVisibility(true), true);
-  assert.deepEqual(r.sent, [{ visibility: "hide" }, { visibility: "show" }]);
+  assert.equal(s.requestConnection(false), true);
+  assert.equal(s.requestConnection(true), true);
+  assert.deepEqual(r.sent, [{ connection: "disconnect" }, { connection: "connect" }]);
+});
+
+// Guards (b): resend replays only message entries after `since`, each tagged
+// with cursor = since + i + 1 (threading `since` through), then signals done.
+test("resend replays message entries after since with cursor since+i+1 then done", () => {
+  const r = recDeps();
+  r.entries = [
+    { type: "message", message: { role: "user" } }, // 1 (at/​before since \u2192 skipped)
+    { type: "model_change" }, // 2 (non-message \u2192 skipped)
+    { type: "message", message: { role: "assistant" } }, // 3
+  ];
+  const s = new Session(r.deps);
+  s.onInbound({ resend: { since: 1 } });
+  assert.deepEqual(r.sent, [
+    { event: { type: "message_end", message: { role: "assistant" } }, replay: true, cursor: 3 },
+    { resend: "done" },
+  ]);
+});
+
+// Guards (a) \u2014 the pinning test for pi's ordering: at message_end, extensions run
+// BEFORE sessionManager.appendMessage persists the entry, so getEntries() is one
+// short. The reported cursor (getEntries().length + 1) must equal the entry's
+// FINAL 1-based position after the append.
+test("message_end reports cursor equal to the entry's final position (append happens after)", () => {
+  const r = recDeps();
+  r.entries = [
+    { type: "message", message: { role: "user" } },
+    { type: "message", message: { role: "assistant" } },
+  ];
+  const s = new Session(r.deps);
+  const msg = { role: "assistant", content: [{ type: "text", text: "hi" }] };
+  // pi emits message_end while getEntries() still has 2 entries.
+  s.forwardEvent({ type: "message_end", message: msg });
+  // pi now persists the entry (position 3).
+  r.entries.push({ type: "message", message: msg });
+  assert.deepEqual(r.sent, [{ event: { type: "message_end", message: msg }, cursor: 3 }]);
+  assert.equal(r.entries.length, 3);
+});
+
+// Guards: a message_end whose role is NOT persisted (e.g. a transient role)
+// carries no cursor; tool_execution_end never carries a cursor.
+test("non-persisted roles and tool_execution_end carry no cursor", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+  s.forwardEvent({ type: "message_end", message: { role: "bashExecution" } });
+  s.forwardEvent({ type: "tool_execution_end", id: "t1" });
+  assert.deepEqual(r.sent, [
+    { event: { type: "message_end", message: { role: "bashExecution" } } },
+    { event: { type: "tool_execution_end", id: "t1" } },
+  ]);
+});
+
+// Guards (c) \u2014 round trip: live cursors for 3 messages are 1,2,3; a resend from
+// the 2nd message's cursor (2) replays EXACTLY the 3rd.
+test("round trip: live cursors 1,2,3 then resend from 2 replays exactly the 3rd", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+  for (let i = 0; i < 3; i++) {
+    const msg = { role: "assistant", content: [{ type: "text", text: `m${i}` }] };
+    s.forwardEvent({ type: "message_end", message: msg }); // cursor = entries.length + 1
+    r.entries.push({ type: "message", message: msg }); // pi persists after
+  }
+  const liveCursors = r.sent
+    .map((f) => (f as { cursor?: number }).cursor)
+    .filter((c): c is number => c !== undefined);
+  assert.deepEqual(liveCursors, [1, 2, 3]);
+
+  r.sent.length = 0;
+  s.onInbound({ resend: { since: 2 } });
+  assert.deepEqual(r.sent, [
+    {
+      event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "m2" }] } },
+      replay: true,
+      cursor: 3,
+    },
+    { resend: "done" },
+  ]);
+});
+
+// Guards: a bashExecution entry (persisted by pi WITHOUT a message_end emit, so
+// never streamed live) sits between two live messages. Live and replay cursors
+// must agree \u2014 no duplicate, and no live-visible message skipped.
+test("round trip: a bash entry between live messages \u2014 live and replay cursors agree", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+
+  // message 1 (assistant) streams live at cursor 1, then pi persists it.
+  const m1 = { role: "assistant", content: [{ type: "text", text: "m1" }] };
+  s.forwardEvent({ type: "message_end", message: m1 });
+  r.entries.push({ type: "message", message: m1 });
+  // pi flushes a bash entry (no message_end emit) \u2014 appended to entries only.
+  r.entries.push({ type: "message", message: { role: "bashExecution", content: [] } });
+  // message 2 (assistant) streams live at cursor 3, then pi persists it.
+  const m2 = { role: "assistant", content: [{ type: "text", text: "m2" }] };
+  s.forwardEvent({ type: "message_end", message: m2 });
+  r.entries.push({ type: "message", message: m2 });
+
+  const liveCursors = r.sent
+    .map((f) => (f as { cursor?: number }).cursor)
+    .filter((c): c is number => c !== undefined);
+  assert.deepEqual(liveCursors, [1, 3]); // bash never streamed live
+
+  // Resend from the 1st message's cursor replays EXACTLY m2 at the same cursor 3.
+  r.sent.length = 0;
+  s.onInbound({ resend: { since: 1 } });
+  assert.deepEqual(r.sent, [
+    { event: { type: "message_end", message: m2 }, replay: true, cursor: 3 },
+    { resend: "done" },
+  ]);
+});
+
+// Guards (d): the register cursor is getEntries().length, threaded through
+// buildRegisterArgs so the daemon seeds a fresh slot to the pane's position.
+test("buildRegisterArgs threads the register cursor (getEntries().length)", () => {
+  const r = recDeps();
+  r.entries = [{ type: "message" }, { type: "message" }, { type: "custom" }];
+  const s = new Session(r.deps);
+  const args = s.buildRegisterArgs({
+    sessionId: "S",
+    project: "p",
+    work: "w",
+    dir: "/d",
+    piVersion: "0.85.1",
+    cursor: r.deps.getEntries().length,
+  });
+  assert.equal(args.cursor, 3);
 });

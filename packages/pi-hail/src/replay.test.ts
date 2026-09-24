@@ -1,62 +1,115 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { readSessionEvents } from "./replay.ts";
+import { entriesAfter, PERSISTED_ROLES } from "./replay.ts";
 
-/** Write a JSONL fixture under os.tmpdir() and return its path plus a cleanup. */
-function withFixture(lines: unknown[]): { file: string; cleanup: () => void } {
-  const dir = mkdtempSync(join(tmpdir(), "pi-hail-replay-"));
-  const file = join(dir, "session.jsonl");
-  writeFileSync(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n", "utf8");
-  return { file, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
+// entriesAfter is a PURE helper over pi's in-memory entry list
+// (sessionManager.getEntries()). The cursor unit is an index into that list.
+// It maps each stored {"type":"message", message} entry AFTER `since` to a
+// {"type":"message_end", message} event tagged with cursor = since + i + 1
+// (i = the entry's index within the slice). Non-message entries are skipped
+// but still consume a slice position.
 
-// Guards: after a daemon restart, the phone's event history has no hole — replay resumes exactly after the daemon's `have` cursor.
-test("readSessionEvents returns only entries after the have cursor, in order", () => {
+test("entriesAfter maps message entries to message_end frames with cursor since+i+1", () => {
   const entries = [
-    { type: "message_start", id: "m1" },
-    { type: "message_end", id: "m1" },
-    { type: "turn_start" },
-    { type: "turn_end" },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "one" }] } },
+    { type: "model_change" },
+    { type: "message", message: { role: "toolResult", content: [] } },
   ];
-  const { file, cleanup } = withFixture(entries);
-  try {
-    const out = readSessionEvents(file, 2);
-    assert.deepEqual(out, [{ type: "turn_start" }, { type: "turn_end" }]);
-  } finally {
-    cleanup();
-  }
+  assert.deepEqual(entriesAfter(entries, 0), [
+    {
+      event: {
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "one" }] },
+      },
+      cursor: 1,
+    },
+    { event: { type: "message_end", message: { role: "toolResult", content: [] } }, cursor: 3 },
+  ]);
 });
 
-// Guards: a `have` of 0 (daemon has nothing) replays the whole session; a `have` past the end replays nothing.
-test("have=0 replays all; have>=len replays none", () => {
-  const entries = [{ type: "a" }, { type: "b" }, { type: "c" }];
-  const { file, cleanup } = withFixture(entries);
-  try {
-    assert.deepEqual(readSessionEvents(file, 0), entries);
-    assert.deepEqual(readSessionEvents(file, 3), []);
-    assert.deepEqual(readSessionEvents(file, 99), []);
-  } finally {
-    cleanup();
-  }
+test("entriesAfter threads `since`: only entries after the cursor, with absolute cursors", () => {
+  const entries = [
+    { type: "message", message: { role: "assistant" } },
+    { type: "message", message: { role: "user" } },
+    { type: "message", message: { role: "assistant" } },
+  ];
+  assert.deepEqual(entriesAfter(entries, 2), [
+    { event: { type: "message_end", message: { role: "assistant" } }, cursor: 3 },
+  ]);
 });
 
-// Guards: a missing/unreadable file must never throw and never block pi — replay is best-effort.
-test("a missing file returns [] and never throws", () => {
-  assert.deepEqual(readSessionEvents(join(tmpdir(), "pi-hail-does-not-exist-xyz.jsonl"), 0), []);
+test("entriesAfter skips non-message entry types", () => {
+  const entries = [{ type: "custom" }, { type: "compaction" }, { type: "session_info" }];
+  assert.deepEqual(entriesAfter(entries, 0), []);
 });
 
-// Guards: a partially-corrupt session file yields the entries it could parse, not a crash.
-test("a corrupt line is skipped, valid entries still returned", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-hail-replay-"));
-  const file = join(dir, "session.jsonl");
-  writeFileSync(file, '{"type":"a"}\nnot json {{{\n{"type":"c"}\n', "utf8");
-  try {
-    const out = readSessionEvents(file, 0);
-    assert.deepEqual(out, [{ type: "a" }, { type: "c" }]);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+// Guards: pi's _flushPendingBashMessages persists {"type":"message",
+// role:"bashExecution"} entries WITHOUT a message_end emit, so those never
+// stream live. Replay must skip them (and other non-live roles) while they
+// still occupy their slice index, so cursors stay each emitted entry's true
+// position. Only user | assistant | toolResult | system roles replay.
+test("entriesAfter replays only roles that stream live, skipping bashExecution while keeping the index", () => {
+  const entries = [
+    { type: "message", message: { role: "user" } }, // 0 (skipped by since=1)
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "a" }] } }, // 1
+    { type: "message", message: { role: "bashExecution", content: [] } }, // 2 (never live)
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "b" }] } }, // 3
+  ];
+  assert.deepEqual(entriesAfter(entries, 1), [
+    {
+      event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "a" }] } },
+      cursor: 2,
+    },
+    {
+      event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "b" }] } },
+      cursor: 4,
+    },
+  ]);
+});
+
+test("entriesAfter past the end yields nothing", () => {
+  assert.deepEqual(entriesAfter([{ type: "message", message: {} }], 5), []);
+});
+
+// pi emits a LIVE message_end for role "custom" (agent-session.js) and then
+// persists it as a {"type":"custom_message", customType, content, display,
+// details} entry (appendCustomMessageEntry). Since Session.forwardEvent streams
+// the custom role live, replay MUST reproduce it too, or a catch-up would drop
+// the custom message the live stream sent. Replay maps the custom_message entry
+// back to {role:"custom", customType, content, display, details} at the same
+// cursor rule (since + i + 1).
+test("entriesAfter replays custom_message entries as role custom (they stream live)", () => {
+  const entries = [
+    { type: "message", message: { role: "user", content: [{ type: "text", text: "hi" }] } },
+    { type: "custom_message", customType: "plan", content: "do X", display: "Plan", details: { a: 1 } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } },
+  ];
+  assert.deepEqual(entriesAfter(entries, 0), [
+    {
+      event: { type: "message_end", message: { role: "user", content: [{ type: "text", text: "hi" }] } },
+      cursor: 1,
+    },
+    {
+      event: {
+        type: "message_end",
+        message: { role: "custom", customType: "plan", content: "do X", display: "Plan", details: { a: 1 } },
+      },
+      cursor: 2,
+    },
+    {
+      event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } },
+      cursor: 3,
+    },
+  ]);
+});
+
+// The live-forward gate (Session.forwardEvent) and the replay gate (entriesAfter)
+// must cover EXACTLY the same roles or a catch-up drifts from the live stream.
+// entriesAfter reproduces the message roles via {"type":"message"} entries plus
+// the custom role via {"type":"custom_message"} entries; their union must equal
+// the single-source PERSISTED_ROLES the live path uses.
+test("replay roles equal the live PERSISTED_ROLES set (message roles + custom)", () => {
+  const replayMessageRoles = ["user", "assistant", "toolResult", "system"];
+  const replayCovered = new Set([...replayMessageRoles, "custom"]);
+  assert.deepEqual([...replayCovered].sort(), [...PERSISTED_ROLES].sort());
 });

@@ -32,16 +32,17 @@ export function fakeDeps() {
   const setStatus = recorder<[string | undefined]>();
   const notify = recorder<[string, ("info" | "warning" | "error")?]>();
   const holdInput = recorder<[boolean]>();
-  const readSessionEvents = (_sinceSeq: number): unknown[] => [];
+  const getEntries = (): unknown[] => [];
   const deps: SessionDeps & {
     send: typeof send;
     sendUserMessage: typeof sendUserMessage;
     ui: { setStatus: typeof setStatus; notify: typeof notify; holdInput: typeof holdInput };
+    getEntries: typeof getEntries;
   } = {
     send,
     sendUserMessage,
     ui: { setStatus, notify, holdInput },
-    readSessionEvents,
+    getEntries,
   };
   return deps;
 }

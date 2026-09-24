@@ -14,14 +14,14 @@ Add the extension to `~/.pi/agent/settings.json`:
 
 The extension loads on every pi session but is inert unless it owns an interactive TUI pane and the hail daemon is running. A missing or slow daemon never blocks pi.
 
-## Phone visibility (0.2.0)
+## Connect / Disconnect (0.3.0)
 
-Sessions running inside tmux under proj's `project/work` naming are shared with
-your phone automatically. The status line shows `hidden from phone · /hail show`
-when you (or your phone) have hidden the session.
+Sessions running inside tmux under proj's `project/work` naming stream to your
+phone automatically and stay openable even with the Mac asleep. The status line
+shows `hail: disconnected · /hail connect` while disconnected.
 
-- `/hail hide` — hide this session from your phone (pi keeps running).
-- `/hail show` — show it again, with its history intact.
+- `/hail disconnect` — stop streaming this session to your phone (pi keeps running).
+- `/hail connect` — resume streaming; the phone catches up on what it missed.
 
 ## Wire protocol (C4 summary)
 

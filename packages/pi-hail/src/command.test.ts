@@ -9,23 +9,23 @@ function sessionWithSends() {
     send: (o) => sent.push(o),
     sendUserMessage: () => {},
     ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {} },
-    readSessionEvents: () => [],
+    getEntries: () => [],
   };
   return { session: new Session(deps), sent };
 }
 
-test("/hail show and /hail hide send visibility requests", () => {
+test("/hail connect and /hail disconnect send connection requests", () => {
   const { session, sent } = sessionWithSends();
   const notes: string[] = [];
-  runHailCommand("show", session, (m) => notes.push(m));
-  runHailCommand(" hide ", session, (m) => notes.push(m));
-  assert.deepEqual(sent, [{ visibility: "show" }, { visibility: "hide" }]);
+  runHailCommand("connect", session, (m) => notes.push(m));
+  runHailCommand(" disconnect ", session, (m) => notes.push(m));
+  assert.deepEqual(sent, [{ connection: "connect" }, { connection: "disconnect" }]);
   assert.equal(notes.length, 2);
 });
 
 test("/hail with no session explains it is not connected", () => {
   const notes: string[] = [];
-  runHailCommand("show", undefined, (m) => notes.push(m));
+  runHailCommand("connect", undefined, (m) => notes.push(m));
   assert.match(notes[0], /not connected/);
 });
 
@@ -36,5 +36,5 @@ test("/hail with an unknown argument prints usage", () => {
   runHailCommand("bogus", session, (m) => notes.push(m));
   assert.deepEqual(sent, []);
   assert.equal(notes.length, 2);
-  for (const n of notes) assert.match(n, /usage: \/hail show \| hide/);
+  for (const n of notes) assert.match(n, /usage: \/hail connect \| disconnect/);
 });
