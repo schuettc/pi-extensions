@@ -6,6 +6,7 @@
 
 import type { PromptPermissionDetails } from "@gotgenes/pi-permission-system";
 import type { Phone, RegisterArgs, RegisterReply } from "./protocol.ts";
+import { entriesAfter } from "./replay.ts";
 import { presenceToStatus } from "./status.ts";
 import { EXTENSION_VERSION } from "./version.ts";
 
@@ -31,8 +32,14 @@ export interface SessionDeps {
     notify: (msg: string, level?: "info" | "warning" | "error") => void;
     holdInput: (held: boolean) => void;
   };
-  /** Catch-up source (streaming spec §4.3): completed events after a cursor. */
-  readSessionEntriesAfter: (cursor: number) => { events: unknown[]; cursor: number };
+  /**
+   * pi's IN-MEMORY entry list (ctx.sessionManager.getEntries(), which excludes
+   * the "session" header). The cursor unit is an index into this list; it is the
+   * catch-up source (streaming spec §4.3). We never read pi's session FILE:
+   * message_end fires before appendMessage persists, and the file is written
+   * lazily, so a file-line count is one short and unreliable early.
+   */
+  getEntries: () => unknown[];
 }
 
 export interface RegisterInput {
@@ -134,9 +141,34 @@ export class Session {
     }
   }
 
-  /** Forward a pi event verbatim, wrapped as { event }. */
+  // Roles pi persists as a session entry at message_end (agent-session.js): a
+  // custom message, or a system/user/assistant/toolResult LLM message. Only
+  // these advance the cursor.
+  private static readonly PERSISTED_ROLES = new Set([
+    "user",
+    "assistant",
+    "toolResult",
+    "system",
+    "custom",
+  ]);
+
+  /**
+   * Forward a pi event verbatim, wrapped as { event }. A completed message that
+   * pi WILL persist is tagged with cursor = getEntries().length + 1 — the
+   * entry's final 1-based position. This runs at message_end, BEFORE pi's
+   * appendMessage, so getEntries() is one short and the +1 lands on the entry's
+   * eventual slot. Non-persisted roles, and tool_execution_end, carry NO cursor.
+   */
   forwardEvent(piEvent: unknown): void {
     if (!this.isActive) return;
+    const e = piEvent as { type?: string; message?: { role?: string } } | null;
+    if (e?.type === "message_end") {
+      const role = e.message?.role;
+      if (role !== undefined && Session.PERSISTED_ROLES.has(role)) {
+        this.deps.send({ event: piEvent, cursor: this.deps.getEntries().length + 1 });
+        return;
+      }
+    }
     this.deps.send({ event: piEvent });
   }
 
@@ -280,20 +312,17 @@ export class Session {
     return true;
   }
 
-  /** Replay completed session-file entries after `since` at catch-up priority. */
+  /**
+   * Replay completed message entries after `since` at catch-up priority. Each
+   * replay frame carries its absolute cursor (since + i + 1) so the daemon
+   * records where it left off; the trailing { resend:"done" } flushes its hold.
+   */
   onResend(since: number): void {
     if (!this.isActive) return;
-    const { events } = this.deps.readSessionEntriesAfter(since);
-    for (const event of events) {
-      this.deps.send({ event, replay: true });
+    for (const { event, cursor } of entriesAfter(this.deps.getEntries(), since)) {
+      this.deps.send({ event, replay: true, cursor });
     }
     this.deps.send({ resend: "done" });
-  }
-
-  /** Forward a completed pi event tagged with the pane's session-file position. */
-  forwardCompleted(piEvent: unknown, cursor: number): void {
-    if (!this.isActive) return;
-    this.deps.send({ event: piEvent, cursor });
   }
 
   private renderStatus(): void {

@@ -1,43 +1,32 @@
-// Cursor-based catch-up (streaming spec §4.3). Reads pi's session file (JSONL)
-// and returns, IN ORDER, the completed-message events AFTER a cursor position
-// (a count of session-file entries), each mapped from a stored
-// {"type":"message", message} entry to a {"type":"message_end", message} event.
-// Other entry types (session, custom, custom_message, compaction, model_change,
-// thinking_level_change, session_info) are skipped. File order is used as-is
-// (append-only; parentId branch structure is not reconstructed).
+// Cursor-based catch-up (streaming spec §4.3). The cursor unit is an index into
+// pi's IN-MEMORY entry list (sessionManager.getEntries(), which excludes the
+// "session" header). We deliberately do NOT read pi's session FILE: at
+// message_end extensions run BEFORE sessionManager.appendMessage persists the
+// entry, and the file itself is written lazily (nothing until the first
+// assistant message), so a file-line count is one short and unreliable early.
 //
-// Best-effort by contract: a missing/unreadable/corrupt file returns whatever
-// parsed (or []) and never throws.
+// entriesAfter is a PURE helper: given the entry array and a `since` cursor it
+// returns, IN ORDER, the completed-message events AFTER that position — each
+// stored {"type":"message", message} entry mapped to a
+// {"type":"message_end", message} event and tagged with its ABSOLUTE 1-based
+// cursor (since + i + 1, where i is the entry's index within the slice). Other
+// entry types (custom, custom_message, compaction, model_change,
+// thinking_level_change, session_info, …) are skipped but still consume a slice
+// position, so cursors stay stable across replays.
 
-import { readFileSync } from "node:fs";
+export interface ReplayFrame {
+  event: { type: "message_end"; message: unknown };
+  cursor: number;
+}
 
-export function readSessionEntriesAfter(
-  sessionFile: string,
-  cursor: number,
-): { events: unknown[]; cursor: number } {
-  let raw: string;
-  try {
-    raw = readFileSync(sessionFile, "utf8");
-  } catch {
-    return { events: [], cursor: 0 };
-  }
-  const entries: unknown[] = [];
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    try {
-      entries.push(JSON.parse(trimmed));
-    } catch {
-      // Skip a partial/corrupt line.
-    }
-  }
-  const from = Number.isFinite(cursor) && cursor > 0 ? cursor : 0;
-  const events: unknown[] = [];
-  for (const entry of entries.slice(from)) {
+export function entriesAfter(entries: unknown[], since: number): ReplayFrame[] {
+  const from = Number.isFinite(since) && since > 0 ? since : 0;
+  const frames: ReplayFrame[] = [];
+  entries.slice(from).forEach((entry, i) => {
     const e = entry as { type?: string; message?: unknown } | null;
     if (e && e.type === "message" && e.message !== undefined) {
-      events.push({ type: "message_end", message: e.message });
+      frames.push({ event: { type: "message_end", message: e.message }, cursor: from + i + 1 });
     }
-  }
-  return { events, cursor: entries.length };
+  });
+  return frames;
 }

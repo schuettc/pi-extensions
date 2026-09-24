@@ -13,7 +13,6 @@ import type { PermissionsService } from "@gotgenes/pi-permission-system";
 import { DaemonSocket, realConnect, type Connect } from "./socket.ts";
 import { Session, type RegisterInput, type SessionDeps } from "./session.ts";
 import { deriveIdentity, type TmuxFacts } from "./identity.ts";
-import { readSessionEntriesAfter } from "./replay.ts";
 import { createPhoneAuthorizer } from "./authorizer.ts";
 import { runHailCommand } from "./command.ts";
 
@@ -154,13 +153,6 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   let session: Session | undefined;
   let socket: DaemonSocket | undefined;
   let registerInput: RegisterInput | undefined;
-  // Captured at the owning session_start so handlers outside that closure (the
-  // forwarded-event loop) can read the pane's current session-file position.
-  let getSessionFile: (() => string | undefined) | undefined;
-  const currentCursor = (): number => {
-    const file = getSessionFile?.();
-    return file ? readSessionEntriesAfter(file, 0).cursor : 0;
-  };
   // The input handler reads this flag; the Session sets it via ui.holdInput
   // while a phone turn runs, so local terminal input is held (not dropped).
   let heldFlag = false;
@@ -186,14 +178,17 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
 
       const c = ctx as {
         cwd: string;
-        sessionManager: { getSessionId: () => unknown; getSessionFile?: () => string | undefined };
+        sessionManager: { getSessionId: () => unknown; getEntries?: () => unknown[] };
         ui: {
           setStatus: (key: string, text: string | undefined) => void;
           notify: (msg: string, level: "info" | "warning" | "error") => void;
         };
       };
 
-      getSessionFile = c.sessionManager.getSessionFile?.bind(c.sessionManager);
+      // pi's in-memory entry list is the cursor unit (streaming spec \u00a74.1/\u00a74.3);
+      // never the lazily-written session file. Bound so handlers outside this
+      // closure (the forwarded-event loop) read the pane's current position.
+      const getEntries = (): unknown[] => c.sessionManager.getEntries?.() ?? [];
       const facts = deps.getTmuxFacts ? deps.getTmuxFacts() : readTmuxFacts();
       // Back-compat test seam: an injected @hail_session id overrides the facts.
       if (deps.getTmuxSessionId) facts.hailSession = deps.getTmuxSessionId();
@@ -210,10 +205,10 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         ...(facts.inTmux
           ? { tmux: { socket: facts.socketPath, session: facts.sessionName, pane: facts.paneId } }
           : {}),
-        // Report the pane's current session-file position so the daemon seeds a
+        // Report the pane's current in-memory entry count so the daemon seeds a
         // brand-new slot's cursor to it and never replays pre-existing history
         // (streaming spec \u00a74.1).
-        cursor: currentCursor(),
+        cursor: getEntries().length,
       };
 
       const sessionDeps: SessionDeps = {
@@ -226,10 +221,7 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
             heldFlag = held;
           },
         },
-        readSessionEntriesAfter: (cursor) => {
-          const file = c.sessionManager.getSessionFile?.();
-          return file ? readSessionEntriesAfter(file, cursor) : { events: [], cursor: 0 };
-        },
+        getEntries,
       };
 
       session = new Session(sessionDeps);
@@ -279,14 +271,9 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
     pi.on(name, (event: unknown, ctx: unknown) =>
       safe(() => {
         if (!ownsThisPane || !session || !ownsPane(ctx)) return;
-        // Tag a completed boundary entry with the pane's current session-file
-        // entry count so the daemon records the cursor for catch-up (spec \u00a74.3).
-        const e = event as { type?: string } | null;
-        if (e?.type === "message_end" || e?.type === "tool_execution_end") {
-          session.forwardCompleted(event, currentCursor());
-        } else {
-          session.forwardEvent(event);
-        }
+        // The Session tags a persisted message_end with its cursor from the
+        // in-memory entry list (spec \u00a74.3); everything else forwards verbatim.
+        session.forwardEvent(event);
       }),
     );
   }

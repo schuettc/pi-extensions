@@ -120,10 +120,7 @@ test("phone turn emits lock held on start and released on end", () => {
 // reconnect register reply sends anything.
 test("register reply never replays (catch-up is driven by resend)", () => {
   const deps = fakeDeps();
-  deps.readSessionEntriesAfter = (): { events: unknown[]; cursor: number } => ({
-    events: [{ type: "message_end", message: { role: "assistant" } }],
-    cursor: 3,
-  });
+  deps.getEntries = (): unknown[] => [{ type: "message", message: { role: "assistant" } }];
   const s = new Session(deps);
 
   s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.3.0", accepted: true, have: 2 } });
@@ -162,14 +159,15 @@ function recDeps() {
     sent,
     statuses,
     notes,
-    entries: { events: [] as unknown[], cursor: 0 } as { events: unknown[]; cursor: number },
+    // pi's in-memory entry list (sessionManager.getEntries()); the cursor unit.
+    entries: [] as unknown[],
     deps: undefined as unknown as SessionDeps,
   };
   r.deps = {
     send: (o) => sent.push(o),
     sendUserMessage: () => {},
     ui: { setStatus: (t) => statuses.push(t), notify: (m) => notes.push(m), holdInput: () => {} },
-    readSessionEntriesAfter: () => r.entries,
+    getEntries: () => r.entries,
   };
   return r;
 }
@@ -201,13 +199,96 @@ test("requestConnection sends connect/disconnect frames", () => {
   assert.deepEqual(r.sent, [{ connection: "disconnect" }, { connection: "connect" }]);
 });
 
-test("resend replays completed entries then signals done", () => {
+// Guards (b): resend replays only message entries after `since`, each tagged
+// with cursor = since + i + 1 (threading `since` through), then signals done.
+test("resend replays message entries after since with cursor since+i+1 then done", () => {
   const r = recDeps();
-  r.entries = { events: [{ type: "message_end", message: { role: "assistant" } }], cursor: 3 };
+  r.entries = [
+    { type: "message", message: { role: "user" } }, // 1 (at/​before since \u2192 skipped)
+    { type: "model_change" }, // 2 (non-message \u2192 skipped)
+    { type: "message", message: { role: "assistant" } }, // 3
+  ];
   const s = new Session(r.deps);
   s.onInbound({ resend: { since: 1 } });
   assert.deepEqual(r.sent, [
-    { event: { type: "message_end", message: { role: "assistant" } }, replay: true },
+    { event: { type: "message_end", message: { role: "assistant" } }, replay: true, cursor: 3 },
     { resend: "done" },
   ]);
+});
+
+// Guards (a) \u2014 the pinning test for pi's ordering: at message_end, extensions run
+// BEFORE sessionManager.appendMessage persists the entry, so getEntries() is one
+// short. The reported cursor (getEntries().length + 1) must equal the entry's
+// FINAL 1-based position after the append.
+test("message_end reports cursor equal to the entry's final position (append happens after)", () => {
+  const r = recDeps();
+  r.entries = [
+    { type: "message", message: { role: "user" } },
+    { type: "message", message: { role: "assistant" } },
+  ];
+  const s = new Session(r.deps);
+  const msg = { role: "assistant", content: [{ type: "text", text: "hi" }] };
+  // pi emits message_end while getEntries() still has 2 entries.
+  s.forwardEvent({ type: "message_end", message: msg });
+  // pi now persists the entry (position 3).
+  r.entries.push({ type: "message", message: msg });
+  assert.deepEqual(r.sent, [{ event: { type: "message_end", message: msg }, cursor: 3 }]);
+  assert.equal(r.entries.length, 3);
+});
+
+// Guards: a message_end whose role is NOT persisted (e.g. a transient role)
+// carries no cursor; tool_execution_end never carries a cursor.
+test("non-persisted roles and tool_execution_end carry no cursor", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+  s.forwardEvent({ type: "message_end", message: { role: "bashExecution" } });
+  s.forwardEvent({ type: "tool_execution_end", id: "t1" });
+  assert.deepEqual(r.sent, [
+    { event: { type: "message_end", message: { role: "bashExecution" } } },
+    { event: { type: "tool_execution_end", id: "t1" } },
+  ]);
+});
+
+// Guards (c) \u2014 round trip: live cursors for 3 messages are 1,2,3; a resend from
+// the 2nd message's cursor (2) replays EXACTLY the 3rd.
+test("round trip: live cursors 1,2,3 then resend from 2 replays exactly the 3rd", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+  for (let i = 0; i < 3; i++) {
+    const msg = { role: "assistant", content: [{ type: "text", text: `m${i}` }] };
+    s.forwardEvent({ type: "message_end", message: msg }); // cursor = entries.length + 1
+    r.entries.push({ type: "message", message: msg }); // pi persists after
+  }
+  const liveCursors = r.sent
+    .map((f) => (f as { cursor?: number }).cursor)
+    .filter((c): c is number => c !== undefined);
+  assert.deepEqual(liveCursors, [1, 2, 3]);
+
+  r.sent.length = 0;
+  s.onInbound({ resend: { since: 2 } });
+  assert.deepEqual(r.sent, [
+    {
+      event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "m2" }] } },
+      replay: true,
+      cursor: 3,
+    },
+    { resend: "done" },
+  ]);
+});
+
+// Guards (d): the register cursor is getEntries().length, threaded through
+// buildRegisterArgs so the daemon seeds a fresh slot to the pane's position.
+test("buildRegisterArgs threads the register cursor (getEntries().length)", () => {
+  const r = recDeps();
+  r.entries = [{ type: "message" }, { type: "message" }, { type: "custom" }];
+  const s = new Session(r.deps);
+  const args = s.buildRegisterArgs({
+    sessionId: "S",
+    project: "p",
+    work: "w",
+    dir: "/d",
+    piVersion: "0.85.1",
+    cursor: r.deps.getEntries().length,
+  });
+  assert.equal(args.cursor, 3);
 });

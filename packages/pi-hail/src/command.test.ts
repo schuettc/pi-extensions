@@ -9,7 +9,7 @@ function sessionWithSends() {
     send: (o) => sent.push(o),
     sendUserMessage: () => {},
     ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {} },
-    readSessionEntriesAfter: () => ({ events: [], cursor: 0 }),
+    getEntries: () => [],
   };
   return { session: new Session(deps), sent };
 }

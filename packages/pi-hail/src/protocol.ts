@@ -25,8 +25,9 @@ export interface RegisterArgs {
   tmuxSocket?: string;
   tmuxSession?: string;
   tmuxPane?: string;
-  /** The pane's current session-file position, reported so the daemon can
-   *  initialize its cursor on first registration (streaming spec §4.1). */
+  /** The pane's current in-memory entry count (sessionManager.getEntries().length),
+   *  reported so the daemon can initialize its cursor on first registration
+   *  (streaming spec §4.1). */
   cursor?: number;
 }
 

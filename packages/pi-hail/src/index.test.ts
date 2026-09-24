@@ -79,6 +79,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
     sessionManager: {
       getSessionId: () => "S",
       getSessionFile: () => undefined,
+      getEntries: () => [],
     },
     ui: { setStatus: spy<[string, unknown]>(), notify: spy<[string, unknown]>() },
     ...overrides,
@@ -124,6 +125,27 @@ test("tui session_start registers, and turn_start/turn_end forward through the s
   const frames = fake.writes.slice(1).map((w) => JSON.parse(w));
   assert.ok(frames.some((f) => f.turn === "start"), "expected a { turn:'start' } frame");
   assert.ok(frames.some((f) => f.turn === "end"), "expected a { turn:'end' } frame");
+});
+
+// Guards (d): the register frame reports the pane's current in-memory cursor
+// (sessionManager.getEntries().length) so the daemon seeds a fresh slot to it
+// and never replays pre-existing history (streaming spec \u00a74.1).
+test("register frame reports cursor = getEntries().length", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  const ctx = makeCtx({
+    sessionManager: {
+      getSessionId: () => "S",
+      getSessionFile: () => undefined,
+      getEntries: () => [{ type: "message" }, { type: "message" }, { type: "custom" }],
+    },
+  });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  const reg = JSON.parse(fake.writes[0]);
+  assert.equal(reg.args.cursor, 3);
 });
 
 // Guards: a daemon-spawned pi must register under the Hail task id stamped on
