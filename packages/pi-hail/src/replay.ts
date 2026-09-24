@@ -20,30 +20,72 @@
 // so those never reach a phone through the live stream. If replay resent every
 // {"type":"message"} entry, a catch-up would show bash results the live stream
 // never sent. So we only replay message entries whose role also streams live
-// (user | assistant | toolResult | system) and skip every other entry
-// (bashExecution role, custom_message, compaction, …) while it still occupies
-// its slice index, keeping cursor = since + i + 1 each emitted entry's true
-// position.
+// (user | assistant | toolResult | system) and skip every non-live entry
+// (bashExecution role, compaction, …) while it still occupies its slice index,
+// keeping cursor = since + i + 1 each emitted entry's true position.
+//
+// The "custom" role is special: pi emits a LIVE message_end for it
+// (agent-session.js), then persists it via appendCustomMessageEntry as a
+// {"type":"custom_message", customType, content, display, details} entry — NOT a
+// {"type":"message"} entry. Because the live path forwards it (custom is in
+// PERSISTED_ROLES), replay MUST reproduce it too, mapping the custom_message
+// entry back to the live shape {role:"custom", customType, content, display,
+// details}. Otherwise a catch-up would silently drop a custom message the phone
+// already saw live.
 
 export interface ReplayFrame {
   event: { type: "message_end"; message: unknown };
   cursor: number;
 }
 
-// Message roles pi streams live via a message_end emit. Kept in lockstep with
-// the live-forward rule so replay and live cursors agree for the same entries.
-const LIVE_ROLES = new Set(["user", "assistant", "toolResult", "system"]);
+// Roles carried on a stored {"type":"message"} entry that also stream live.
+const MESSAGE_ROLES = new Set(["user", "assistant", "toolResult", "system"]);
+
+// SINGLE SOURCE of the roles pi both streams live at message_end AND persists
+// (agent-session.js). The live-forward gate (Session.forwardEvent) imports this
+// exact set, and entriesAfter reproduces the same roles below — the message
+// roles via {"type":"message"} entries plus "custom" via {"type":"custom_message"}
+// entries — so the live and replay coverage can never drift.
+export const PERSISTED_ROLES: ReadonlySet<string> = new Set([...MESSAGE_ROLES, "custom"]);
 
 export function entriesAfter(entries: unknown[], since: number): ReplayFrame[] {
   const from = Number.isFinite(since) && since > 0 ? since : 0;
   const frames: ReplayFrame[] = [];
   entries.slice(from).forEach((entry, i) => {
+    const cursor = from + i + 1;
     const e = entry as { type?: string; message?: { role?: string } } | null;
-    if (e && e.type === "message" && e.message !== undefined) {
+    if (!e || typeof e.type !== "string") return;
+
+    if (e.type === "message" && e.message !== undefined) {
       const role = e.message?.role;
-      if (role !== undefined && LIVE_ROLES.has(role)) {
-        frames.push({ event: { type: "message_end", message: e.message }, cursor: from + i + 1 });
+      if (role !== undefined && MESSAGE_ROLES.has(role)) {
+        frames.push({ event: { type: "message_end", message: e.message }, cursor });
       }
+      return;
+    }
+
+    // A persisted custom message streamed live as role "custom": reconstruct the
+    // live message_end shape so replay matches what the phone already received.
+    if (e.type === "custom_message") {
+      const c = entry as {
+        customType?: unknown;
+        content?: unknown;
+        display?: unknown;
+        details?: unknown;
+      };
+      frames.push({
+        event: {
+          type: "message_end",
+          message: {
+            role: "custom",
+            customType: c.customType,
+            content: c.content,
+            display: c.display,
+            details: c.details,
+          },
+        },
+        cursor,
+      });
     }
   });
   return frames;

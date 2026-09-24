@@ -6,7 +6,7 @@
 
 import type { PromptPermissionDetails } from "@gotgenes/pi-permission-system";
 import type { Phone, RegisterArgs, RegisterReply } from "./protocol.ts";
-import { entriesAfter } from "./replay.ts";
+import { entriesAfter, PERSISTED_ROLES } from "./replay.ts";
 import { presenceToStatus } from "./status.ts";
 import { EXTENSION_VERSION } from "./version.ts";
 
@@ -141,17 +141,6 @@ export class Session {
     }
   }
 
-  // Roles pi persists as a session entry at message_end (agent-session.js): a
-  // custom message, or a system/user/assistant/toolResult LLM message. Only
-  // these advance the cursor.
-  private static readonly PERSISTED_ROLES = new Set([
-    "user",
-    "assistant",
-    "toolResult",
-    "system",
-    "custom",
-  ]);
-
   /**
    * Forward a pi event verbatim, wrapped as { event }. A completed message that
    * pi WILL persist is tagged with cursor = getEntries().length + 1 — the
@@ -164,7 +153,7 @@ export class Session {
     const e = piEvent as { type?: string; message?: { role?: string } } | null;
     if (e?.type === "message_end") {
       const role = e.message?.role;
-      if (role !== undefined && Session.PERSISTED_ROLES.has(role)) {
+      if (role !== undefined && PERSISTED_ROLES.has(role)) {
         this.deps.send({ event: piEvent, cursor: this.deps.getEntries().length + 1 });
         return;
       }
