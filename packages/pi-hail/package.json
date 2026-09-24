@@ -1,6 +1,6 @@
 {
   "name": "pi-hail",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A pi coding-agent extension that connects a pi session to the local hail daemon so a paired phone can watch it and drive it.",
   "type": "module",
   "license": "MIT",

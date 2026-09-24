@@ -115,26 +115,22 @@ test("phone turn emits lock held on start and released on end", () => {
   assert.deepEqual(deps.send.calls[3][0], { lock: "released" });
 });
 
-// Guards: after a daemon restart, replay backfills the gap; a first connect must NOT replay (no double-send).
-test("a reconnect register reply replays events; a first-connect reply does not", () => {
+// Guards: register no longer replays \u2014 the daemon drives catch-up via a
+// {"resend":{since}} frame (streaming spec \u00a74.3). Neither a first-connect nor a
+// reconnect register reply sends anything.
+test("register reply never replays (catch-up is driven by resend)", () => {
   const deps = fakeDeps();
-  const replayed = [
-    { type: "turn_start" },
-    { type: "message_start", id: "m9" },
-  ];
-  // Stub the replay source to return known entries regardless of cursor.
-  deps.readSessionEvents = (_sinceSeq: number): unknown[] => replayed;
+  deps.readSessionEntriesAfter = (): { events: unknown[]; cursor: number } => ({
+    events: [{ type: "message_end", message: { role: "assistant" } }],
+    cursor: 3,
+  });
   const s = new Session(deps);
 
-  // First connect: stores `have`, does not replay.
   s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.3.0", accepted: true, have: 2 } });
   assert.equal(deps.send.calls.length, 0);
 
-  // Reconnect: replays each returned entry as a live { event } frame, in order.
   s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.3.0", accepted: true, have: 5 } });
-  assert.equal(deps.send.calls.length, replayed.length);
-  assert.deepEqual(deps.send.calls[0][0], { event: { type: "turn_start" } });
-  assert.deepEqual(deps.send.calls[1][0], { event: { type: "message_start", id: "m9" } });
+  assert.equal(deps.send.calls.length, 0);
 });
 
 // Guards: a version mismatch is one plain sentence in pi and then silence — never a silent downstream failure (C6, spec §7).
@@ -162,44 +158,56 @@ function recDeps() {
   const sent: unknown[] = [];
   const statuses: (string | undefined)[] = [];
   const notes: string[] = [];
-  const deps: SessionDeps = {
+  const r = {
+    sent,
+    statuses,
+    notes,
+    entries: { events: [] as unknown[], cursor: 0 } as { events: unknown[]; cursor: number },
+    deps: undefined as unknown as SessionDeps,
+  };
+  r.deps = {
     send: (o) => sent.push(o),
     sendUserMessage: () => {},
     ui: { setStatus: (t) => statuses.push(t), notify: (m) => notes.push(m), holdInput: () => {} },
-    readSessionEvents: () => [],
+    readSessionEntriesAfter: () => r.entries,
   };
-  return { deps, sent, statuses, notes };
+  return r;
 }
 
 // Guards: the pane always tells the truth about whether the phone can see it.
-test("visibility hidden overrides presence in the status line until visible", () => {
+test("connection disconnected overrides presence until connected", () => {
   const r = recDeps();
   const s = new Session(r.deps);
   s.onInbound({ presence: { phones: [{ deviceId: "p", name: "P", state: "connected" }] } });
-  s.onInbound({ visibility: "hidden" });
-  s.onInbound({ presence: { phones: [{ deviceId: "p", name: "P", state: "driving" }] } });
-  s.onInbound({ visibility: "visible" });
-  assert.deepEqual(r.statuses, [
-    "phone connected",
-    "hidden from phone · /hail show",
-    "hidden from phone · /hail show",
-    "phone is working",
-  ]);
+  s.onInbound({ connection: "disconnected" });
+  s.onInbound({ connection: "connected" });
+  assert.deepEqual(r.statuses, ["phone connected", "hail: disconnected · /hail connect", "phone connected"]);
 });
 
-test("visibility unavailable notifies and leaves the status alone", () => {
+test("connection unavailable notifies and leaves the status alone", () => {
   const r = recDeps();
   const s = new Session(r.deps);
-  s.onInbound({ visibility: "unavailable" });
+  s.onInbound({ connection: "unavailable" });
   assert.deepEqual(r.statuses, []);
   assert.equal(r.notes.length, 1);
   assert.match(r.notes[0], /isn't shared with your phone/);
 });
 
-test("requestVisibility sends show/hide frames", () => {
+test("requestConnection sends connect/disconnect frames", () => {
   const r = recDeps();
   const s = new Session(r.deps);
-  assert.equal(s.requestVisibility(false), true);
-  assert.equal(s.requestVisibility(true), true);
-  assert.deepEqual(r.sent, [{ visibility: "hide" }, { visibility: "show" }]);
+  assert.equal(s.requestConnection(false), true);
+  assert.equal(s.requestConnection(true), true);
+  assert.deepEqual(r.sent, [{ connection: "disconnect" }, { connection: "connect" }]);
+});
+
+test("resend replays completed entries then signals done", () => {
+  const r = recDeps();
+  r.entries = { events: [{ type: "message_end", message: { role: "assistant" } }], cursor: 3 };
+  const s = new Session(r.deps);
+  s.onInbound({ resend: { since: 1 } });
+  assert.deepEqual(r.sent, [
+    { event: { type: "message_end", message: { role: "assistant" } }, replay: true },
+    { resend: "done" },
+  ]);
 });

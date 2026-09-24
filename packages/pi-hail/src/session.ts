@@ -15,8 +15,8 @@ export type PhoneDecision = "allow" | "deny" | "defer";
 /** Which side owns the current turn. `idle` at rest. */
 export type Phase = "idle" | "local_turn" | "phone_turn";
 
-/** Status-line text while the daemon has this session hidden from phones. */
-export const HIDDEN_STATUS = "hidden from phone · /hail show";
+/** Status-line text while the daemon has this session disconnected from phones. */
+export const CONNECTION_STATUS_DISCONNECTED = "hail: disconnected · /hail connect";
 
 /** Status-line presence classification. */
 export type PresenceState = "connected" | "driving" | "offline";
@@ -31,8 +31,8 @@ export interface SessionDeps {
     notify: (msg: string, level?: "info" | "warning" | "error") => void;
     holdInput: (held: boolean) => void;
   };
-  /** replay source (Task 7) */
-  readSessionEvents: (sinceSeq: number) => unknown[];
+  /** Catch-up source (streaming spec §4.3): completed events after a cursor. */
+  readSessionEntriesAfter: (cursor: number) => { events: unknown[]; cursor: number };
 }
 
 export interface RegisterInput {
@@ -43,6 +43,8 @@ export interface RegisterInput {
   piVersion: string;
   identity?: "hail" | "proj" | "fallback";
   tmux?: { socket?: string; session?: string; pane?: string };
+  /** The pane's current session-file position (streaming spec §4.1). */
+  cursor?: number;
 }
 
 export class Session {
@@ -60,8 +62,8 @@ export class Session {
   private heldInput: string[] = [];
   /** Last-seen presence, for status-line idempotence. */
   private lastPresence: PresenceState = "offline";
-  /** True while the daemon reports this session hidden from phones. */
-  private hidden = false;
+  /** True while the daemon reports this session disconnected from phones. */
+  private disconnected = false;
   /** Last presence-derived status text, restored when the session is shown. */
   private presenceText: string | undefined = undefined;
 
@@ -107,23 +109,17 @@ export class Session {
       if (input.tmux.session) args.tmuxSession = input.tmux.session;
       if (input.tmux.pane) args.tmuxPane = input.tmux.pane;
     }
+    if (input.cursor !== undefined) args.cursor = input.cursor;
     return args;
   }
 
   /** Handles the register reply: stores replay cursor; refuses on mismatch. */
   onRegisterReply(reply: RegisterReply): void {
     if (reply.ok) {
+      // Stored for diagnostics only: the daemon now drives catch-up via a
+      // {"resend":{since}} frame (streaming spec §4.3), so registration no
+      // longer replays here.
       this.have = reply.data.have;
-      // A reconnect (not the first register): replay pi's own session-file
-      // events after the daemon's `have` cursor so device sequence numbers stay
-      // continuous, BEFORE live forwarding resumes. First-connect skips replay.
-      if (this.hasRegistered) {
-        const events = this.deps.readSessionEvents(this.have ?? 0);
-        for (const event of events) {
-          // Wrap each entry exactly as live forwarding does: send({ event }).
-          this.deps.send({ event });
-        }
-      }
       this.hasRegistered = true;
       return;
     }
@@ -220,17 +216,22 @@ export class Session {
       this.renderStatus();
       return;
     }
-    if ("visibility" in m) {
-      const v = m.visibility;
-      if (v === "hidden" || v === "visible") {
-        this.hidden = v === "hidden";
+    if ("connection" in m) {
+      const v = m.connection;
+      if (v === "connected" || v === "disconnected") {
+        this.disconnected = v === "disconnected";
         this.renderStatus();
       } else if (v === "unavailable") {
         this.deps.ui.notify(
-          "hail: this session isn't shared with your phone (only proj/tmux sessions can be shown or hidden).",
+          "hail: this session isn't shared with your phone (only proj/tmux sessions can connect).",
           "info",
         );
       }
+      return;
+    }
+    if ("resend" in m) {
+      const since = (m.resend as { since?: number }).since ?? 0;
+      this.onResend(since);
       return;
     }
     if ("answer" in m) {
@@ -272,16 +273,32 @@ export class Session {
     });
   }
 
-  /** Ask the daemon to show/hide this session on the phone. False when inert. */
-  requestVisibility(show: boolean): boolean {
+  /** Ask the daemon to connect/disconnect this session. False when inert. */
+  requestConnection(connect: boolean): boolean {
     if (!this.isActive) return false;
-    this.deps.send({ visibility: show ? "show" : "hide" });
+    this.deps.send({ connection: connect ? "connect" : "disconnect" });
     return true;
   }
 
+  /** Replay completed session-file entries after `since` at catch-up priority. */
+  onResend(since: number): void {
+    if (!this.isActive) return;
+    const { events } = this.deps.readSessionEntriesAfter(since);
+    for (const event of events) {
+      this.deps.send({ event, replay: true });
+    }
+    this.deps.send({ resend: "done" });
+  }
+
+  /** Forward a completed pi event tagged with the pane's session-file position. */
+  forwardCompleted(piEvent: unknown, cursor: number): void {
+    if (!this.isActive) return;
+    this.deps.send({ event: piEvent, cursor });
+  }
+
   private renderStatus(): void {
-    if (this.hidden) {
-      this.deps.ui.setStatus(HIDDEN_STATUS);
+    if (this.disconnected) {
+      this.deps.ui.setStatus(CONNECTION_STATUS_DISCONNECTED);
       return;
     }
     if (this.presenceText !== undefined) this.deps.ui.setStatus(this.presenceText);

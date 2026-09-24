@@ -32,7 +32,10 @@ export function fakeDeps() {
   const setStatus = recorder<[string | undefined]>();
   const notify = recorder<[string, ("info" | "warning" | "error")?]>();
   const holdInput = recorder<[boolean]>();
-  const readSessionEvents = (_sinceSeq: number): unknown[] => [];
+  const readSessionEntriesAfter = (_cursor: number): { events: unknown[]; cursor: number } => ({
+    events: [],
+    cursor: 0,
+  });
   const deps: SessionDeps & {
     send: typeof send;
     sendUserMessage: typeof sendUserMessage;
@@ -41,7 +44,7 @@ export function fakeDeps() {
     send,
     sendUserMessage,
     ui: { setStatus, notify, holdInput },
-    readSessionEvents,
+    readSessionEntriesAfter,
   };
   return deps;
 }
