@@ -52,7 +52,24 @@ export type Outbound =
   | { exit: { code: number } }
   | { refused: { requestId: string; reason: "turn_running" } }
   | { connection: "connect" | "disconnect" }
-  | { resend: "done" };
+  | { resend: "done" }
+  | {
+      ask: {
+        requestId: string;
+        title: string;
+        message: string;
+        toolName?: string;
+        surface?: string;
+        value?: string;
+      };
+    }
+  | {
+      askDone: {
+        requestId: string;
+        outcome: "allowed" | "denied" | "deferred";
+        by: "mac" | "phone";
+      };
+    };
 
 /** Daemon → extension, one JSON object per line after register. */
 export type Inbound =

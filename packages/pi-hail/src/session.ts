@@ -93,6 +93,14 @@ export class Session {
    */
   private pendingDecisions = new Map<string, (v: PhoneDecision) => void>();
 
+  /**
+   * Asks pi-hail settled with `defer` (Mac "More options…" / dismissed), whose
+   * lifecycle the permission system's own dialog now owns. A later
+   * `permissions:decision` for one of these closes the phone's card via
+   * onDecision (Task P3); a decision for any other requestId is ignored.
+   */
+  private deferredAsks = new Set<string>();
+
   /** Daemon's last-seen device sequence number, from the register reply. */
   private have: number | undefined = undefined;
   /**
@@ -283,25 +291,77 @@ export class Session {
   }
 
   /**
-   * A permission gate hit during a phone-driven turn. Outside a phone turn (or
-   * when inert) resolve "defer" immediately so pi's normal prompt / pi-auto-review
-   * decide. Otherwise announce the gate to the phone and hold the decision open,
-   * keyed by requestId, until an inbound { answer } resolves it. Never throws.
+   * A permission gate reaching pi-hail's chain link. When inert, or when the
+   * daemon reports this session disconnected from phones, resolve "defer"
+   * immediately so the permission system's own Mac dialog runs unchanged. Only
+   * asks auto-review already deferred reach here.
+   *
+   * Otherwise open the ask on BOTH surfaces at once and let the first answer
+   * win (spec §A):
+   *   - phone: an { ask } frame the daemon renders as a confirm card;
+   *   - Mac:   a select dialog (Allow / Deny / More options…) we can dismiss
+   *            programmatically the moment the phone answers.
+   * There is NO timeout — a human on either device is awaited. Whichever way it
+   * settles, an { askDone } frame tells the daemon who answered and how. Never
+   * throws (a dangling decision at session end only ever resolves).
    */
   requestPhoneDecision(details: PromptPermissionDetails): Promise<PhoneDecision> {
-    if (!this.isActive || this.phase !== "phone_turn") {
+    if (!this.isActive || this.disconnected) {
       return Promise.resolve("defer");
     }
     const requestId = details.requestId;
-    // Announce the ask to the phone as an event frame so it can render + answer.
-    this.deps.send({ event: { type: "permission_prompt", requestId, details } });
-    return new Promise<PhoneDecision>((resolve) => {
+    const label = details.toolName ?? details.surface ?? "this";
+    const title = `Allow ${label}?`;
+    const message = firstPreview(details);
+
+    const ask: {
+      requestId: string;
+      title: string;
+      message: string;
+      toolName?: string;
+      surface?: string;
+      value?: string;
+    } = { requestId, title, message };
+    if (details.toolName) ask.toolName = details.toolName;
+    if (details.surface) ask.surface = details.surface;
+    if (details.value != null) ask.value = details.value;
+    this.deps.send({ ask });
+
+    const phoneP = new Promise<PhoneDecision>((resolve) => {
+      // pi serializes asks, so a live duplicate should never happen; if it does,
+      // resolve defer rather than clobbering the in-flight resolver.
       if (this.pendingDecisions.has(requestId)) {
         resolve("defer");
         return;
       }
       this.pendingDecisions.set(requestId, resolve);
     });
+
+    const ac = new AbortController();
+    const macP = this.deps.ui
+      .openDialog(`${title}\n${message}`, ["Allow", "Deny", "More options…"], ac.signal)
+      .then((choice) => macChoiceToDecision(choice));
+
+    return (async () => {
+      const winner = await Promise.race([
+        phoneP.then((decision) => ({ by: "phone" as const, decision })),
+        macP.then((decision) => ({ by: "mac" as const, decision })),
+      ]);
+      // First answer wins: stop the other surface from also settling.
+      this.pendingDecisions.delete(requestId);
+      if (winner.by === "phone") ac.abort();
+      const outcome =
+        winner.decision === "allow"
+          ? "allowed"
+          : winner.decision === "deny"
+            ? "denied"
+            : "deferred";
+      // A deferred ask is now the permission system's to close (Task P3);
+      // anything else is terminal here.
+      if (outcome === "deferred") this.deferredAsks.add(requestId);
+      this.deps.send({ askDone: { requestId, outcome, by: winner.by } });
+      return winner.decision;
+    })();
   }
 
   /** Ask the daemon to connect/disconnect this session. False when inert. */
@@ -336,4 +396,29 @@ export class Session {
   active(): boolean {
     return this.isActive;
   }
+}
+
+/**
+ * The command/path/value preview an ask carries, in priority order: the first
+ * present, non-empty string among command, path, toolInputPreview, value. The
+ * phone renders this as the card's message so it is never blank.
+ */
+function firstPreview(details: PromptPermissionDetails): string {
+  const candidates = [
+    details.command,
+    details.path,
+    details.toolInputPreview,
+    details.value ?? undefined,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.length > 0) return c;
+  }
+  return "";
+}
+
+/** Map the Mac select choice to a verdict; dismissed (undefined) is a defer. */
+function macChoiceToDecision(choice: string | undefined): PhoneDecision {
+  if (choice === "Allow") return "allow";
+  if (choice === "Deny") return "deny";
+  return "defer"; // "More options…" or Esc/dismissed — never an implicit allow.
 }

@@ -24,7 +24,6 @@ export interface ExtensionDeps {
   getTmuxSessionId?: () => string | undefined;
   /** Test seam: tmux facts for this pane (defaults to one `tmux display-message`). */
   getTmuxFacts?: () => TmuxFacts;
-  timeoutMs?: number;
 }
 
 // Every handler is best-effort: it sits directly on a pi lifecycle event, and a
@@ -145,7 +144,6 @@ const FORWARDED_EVENTS = [
 export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   const connect = deps.connect ?? realConnect;
   const socketPath = deps.socketPath;
-  const timeoutMs = deps.timeoutMs ?? 30000;
 
   // Ownership is captured at the one session_start that owns the pane; a
   // subagent node's stays false, so its events and bus registrations are inert.
@@ -351,7 +349,7 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         }
         return;
       }
-      const authorizer = createPhoneAuthorizer({ session: currentSession, timeoutMs });
+      const authorizer = createPhoneAuthorizer({ session: currentSession });
       authorizerDispose = service.registerAuthorizer("pi-hail", authorizer.authorize);
     }),
   );

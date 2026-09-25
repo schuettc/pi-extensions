@@ -155,6 +155,147 @@ test("SessionDeps.ui exposes an openDialog capability the Session can drive", as
   assert.equal(await p, "Allow");
 });
 
+// ── P2: one ask, both surfaces, first answer wins ──────────────────────────
+
+/** The last `{ ask }` frame's payload, or undefined. */
+function lastAsk(deps: ReturnType<typeof fakeDeps>): Record<string, unknown> | undefined {
+  const frames = deps.send.calls.map((c) => c[0] as Record<string, unknown>);
+  const withAsk = frames.filter((f) => f.ask !== undefined);
+  return withAsk.length ? (withAsk[withAsk.length - 1].ask as Record<string, unknown>) : undefined;
+}
+
+/** The last `{ askDone }` frame's payload, or undefined. */
+function lastAskDone(deps: ReturnType<typeof fakeDeps>): Record<string, unknown> | undefined {
+  const frames = deps.send.calls.map((c) => c[0] as Record<string, unknown>);
+  const withDone = frames.filter((f) => f.askDone !== undefined);
+  return withDone.length ? (withDone[withDone.length - 1].askDone as Record<string, unknown>) : undefined;
+}
+
+// Guards: a session the daemon reports disconnected from phones never opens an
+// ask on either surface \u2014 it defers so the permission system's own Mac dialog runs.
+test("requestPhoneDecision defers immediately when disconnected (no ask, no dialog)", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onInbound({ connection: "disconnected" });
+  const v = await s.requestPhoneDecision({
+    requestId: "r1",
+    toolName: "bash",
+    command: "rm x",
+  } as never);
+  assert.equal(v, "defer");
+  assert.equal(deps.ui.openDialog.calls.length, 0);
+  assert.equal(lastAsk(deps), undefined);
+});
+
+// Guards: while connected the ask opens on BOTH surfaces at once \u2014 an { ask }
+// frame to the phone and a Mac select with Allow / Deny / More options\u2026.
+test("requestPhoneDecision opens both surfaces when connected", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({
+    requestId: "r1",
+    toolName: "bash",
+    surface: "bash",
+    command: "rm -rf x",
+    value: "rm -rf x",
+  } as never);
+  const ask = lastAsk(deps);
+  assert.ok(ask, "expected an { ask } frame");
+  assert.equal(ask.requestId, "r1");
+  assert.equal(ask.title, "Allow bash?");
+  assert.equal(ask.message, "rm -rf x");
+  assert.equal(ask.toolName, "bash");
+  assert.equal(ask.surface, "bash");
+  assert.equal(ask.value, "rm -rf x");
+  assert.equal(deps.ui.openDialog.calls.length, 1);
+  assert.deepEqual(deps.ui.openDialog.calls[0][1], ["Allow", "Deny", "More options\u2026"]);
+  deps.ui.openDialog.resolve(undefined); // settle to avoid a dangling promise
+  await p;
+});
+
+// Guards: the phone answering allow wins \u2014 the Mac dialog's AbortSignal fires and
+// the verdict is allow; an askDone allowed/phone is sent.
+test("phone allow aborts the Mac dialog and settles allow (by phone)", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  const signal = deps.ui.openDialog.lastSignal();
+  assert.ok(signal);
+  s.onInbound({ answer: { requestId: "r1", value: "allow" } });
+  assert.equal(await p, "allow");
+  assert.equal(signal.aborted, true);
+  assert.deepEqual(lastAskDone(deps), { requestId: "r1", outcome: "allowed", by: "phone" });
+});
+
+// Guards: the phone answering deny wins with the teaching reason path, askDone denied/phone.
+test("phone deny settles deny (by phone)", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  s.onInbound({ answer: { requestId: "r1", value: "deny" } });
+  assert.equal(await p, "deny");
+  assert.deepEqual(lastAskDone(deps), { requestId: "r1", outcome: "denied", by: "phone" });
+});
+
+// Guards: Mac \"Allow\" wins, askDone allowed/mac.
+test("Mac Allow settles allow (by mac)", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  deps.ui.openDialog.resolve("Allow");
+  assert.equal(await p, "allow");
+  assert.deepEqual(lastAskDone(deps), { requestId: "r1", outcome: "allowed", by: "mac" });
+});
+
+// Guards: Mac \"Deny\" wins, askDone denied/mac.
+test("Mac Deny settles deny (by mac)", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  deps.ui.openDialog.resolve("Deny");
+  assert.equal(await p, "deny");
+  assert.deepEqual(lastAskDone(deps), { requestId: "r1", outcome: "denied", by: "mac" });
+});
+
+// Guards: Mac \"More options\u2026\" defers to the permission system's full dialog,
+// askDone deferred/mac.
+test("Mac More options\u2026 settles defer (by mac)", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  deps.ui.openDialog.resolve("More options\u2026");
+  assert.equal(await p, "defer");
+  assert.deepEqual(lastAskDone(deps), { requestId: "r1", outcome: "deferred", by: "mac" });
+});
+
+// Guards: the Mac dialog dismissed (Esc \u2192 undefined) is a defer, never an
+// implicit allow; askDone deferred/mac.
+test("Mac dialog dismissed settles defer, never an implicit allow (by mac)", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  deps.ui.openDialog.resolve(undefined);
+  assert.equal(await p, "defer");
+  assert.deepEqual(lastAskDone(deps), { requestId: "r1", outcome: "deferred", by: "mac" });
+});
+
+// Guards: no timeout \u2014 with no answer on either surface the decision stays
+// pending indefinitely (a human on either device is awaited).
+test("without an answer the decision stays pending (no timeout)", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  let settled = false;
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  void p.then(() => {
+    settled = true;
+  });
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(settled, false);
+  deps.ui.openDialog.resolve(undefined); // cleanup
+  await p;
+});
+
 // Guards: a presence frame updates the status line.
 test("onInbound presence sets the status text", () => {
   const deps = fakeDeps();
