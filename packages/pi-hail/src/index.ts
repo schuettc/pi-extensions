@@ -354,11 +354,16 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
     }),
   );
 
-  // Forward the prompt UI so the phone sees the gate it is being asked about.
-  pi.events?.on?.("permissions:ui_prompt", (data: unknown) =>
+  // Close a deferred ask when the permission system's own dialog decides it
+  // (permissions:decision). pi-hail no longer forwards permissions:ui_prompt:
+  // the daemon renders the ask from pi-hail's { ask } frame instead, so that
+  // announcement would only produce a blank phantom card.
+  pi.events?.on?.("permissions:decision", (data: unknown) =>
     safe(() => {
       if (!ownsThisPane || !session) return;
-      session.forwardEvent({ type: "permissions:ui_prompt", payload: data });
+      const d = data as { requestId?: string; result?: string } | null;
+      if (!d?.requestId || (d.result !== "allow" && d.result !== "deny")) return;
+      session.onDecision(d.requestId, d.result);
     }),
   );
 }

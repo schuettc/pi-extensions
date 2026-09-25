@@ -266,6 +266,76 @@ test("failed connect does not throw from session_start", async () => {
   }
 });
 
+// Guards (P3): pi-hail no longer forwards permissions:ui_prompt \u2014 the blank
+// phantom card that had only Deny is gone.
+test("permissions:ui_prompt is no longer forwarded to the phone", async () => {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  const before = fake.writes.length;
+  fireBus("permissions:ui_prompt", { requestId: "r1", payload: {} });
+  await tick();
+  assert.equal(fake.writes.length, before, "permissions:ui_prompt must produce no frame");
+});
+
+// Guards (P3): an ask pi-hail defers is closed on the phone when the permission
+// system's own dialog decides it \u2014 permissions:decision \u2192 askDone allowed/mac.
+test("permissions:decision closes a deferred ask on the wire (allowed/mac)", async () => {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  // Capture the authorizer the extension registers on permissions:ready.
+  let authorize:
+    | ((d: unknown, q: unknown, l: unknown) => Promise<{ kind: string }>)
+    | undefined;
+  const service = {
+    registerAuthorizer: (_name: string, fn: typeof authorize) => {
+      authorize = fn;
+      return () => {};
+    },
+  };
+  // A controllable Mac select dialog (ctx.ui.select).
+  let resolveSelect: (v: string | undefined) => void = () => {};
+  const select = (_t: string, _o: string[], _opts?: unknown) =>
+    new Promise<string | undefined>((r) => {
+      resolveSelect = r;
+    });
+  const ctx = makeCtx({
+    ui: { setStatus: spy<[string, unknown]>(), notify: spy<[string, unknown]>(), select },
+  });
+  createExtension(pi, {
+    connect: async () => fake,
+    getPermissionsService: () => service as never,
+  });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fireBus("permissions:ready", { sessionId: "S" });
+  await tick();
+  assert.ok(authorize, "expected the extension to register an authorizer");
+  const verdictP = authorize({ requestId: "r1", toolName: "bash", command: "rm x" }, {}, {
+    review() {},
+    debug() {},
+  });
+  await tick();
+  resolveSelect("More options\u2026"); // Mac defers to the permission dialog
+  assert.deepEqual(await verdictP, { kind: "defer" });
+  fireBus("permissions:decision", { requestId: "r1", result: "allow" });
+  await tick();
+  const frames = fake.writes.map((w) => JSON.parse(w));
+  const askDones = frames.map((f) => f.askDone).filter((a) => a !== undefined);
+  // The deferral emits askDone deferred/mac; the decision collapses it to
+  // allowed/mac \u2014 assert the final close.
+  assert.deepEqual(askDones.at(-1), { requestId: "r1", outcome: "allowed", by: "mac" });
+  assert.deepEqual(askDones.at(0), { requestId: "r1", outcome: "deferred", by: "mac" });
+});
+
 // Guards: pi quit emits an exit frame with the code.
 test("session_shutdown reason 'quit' emits { exit }", async () => {
   const { pi, fire } = makeFakePi();

@@ -364,6 +364,22 @@ export class Session {
     })();
   }
 
+  /**
+   * The permission system settled an ask pi-hail had deferred to its own Mac
+   * dialog (via `permissions:decision`). Close the phone's card with an askDone
+   * carrying the final outcome, attributed to the Mac. A decision for a
+   * requestId pi-hail never deferred (answered here, or never announced) is
+   * ignored, and each deferred ask closes only once.
+   */
+  onDecision(requestId: string, result: "allow" | "deny"): void {
+    if (!this.isActive) return;
+    if (!this.deferredAsks.has(requestId)) return;
+    this.deferredAsks.delete(requestId);
+    this.deps.send({
+      askDone: { requestId, outcome: result === "allow" ? "allowed" : "denied", by: "mac" },
+    });
+  }
+
   /** Ask the daemon to connect/disconnect this session. False when inert. */
   requestConnection(connect: boolean): boolean {
     if (!this.isActive) return false;

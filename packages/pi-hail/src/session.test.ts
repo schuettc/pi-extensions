@@ -296,6 +296,60 @@ test("without an answer the decision stays pending (no timeout)", async () => {
   await p;
 });
 
+// \u2500\u2500 P3: decision forwarding closes a deferred ask \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+// Guards: an ask pi-hail deferred to the permission system's dialog is closed
+// on the phone when that dialog decides \u2014 allow \u2192 askDone allowed/mac.
+test("onDecision forwards askDone allowed/mac for a deferred ask", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  deps.ui.openDialog.resolve("More options\u2026"); // defers to the permission dialog
+  assert.equal(await p, "defer");
+  s.onDecision("r1", "allow");
+  assert.deepEqual(lastAskDone(deps), { requestId: "r1", outcome: "allowed", by: "mac" });
+});
+
+// Guards: a deferred ask denied by the permission dialog \u2192 askDone denied/mac.
+test("onDecision forwards askDone denied/mac for a deferred ask", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  deps.ui.openDialog.resolve("More options\u2026");
+  assert.equal(await p, "defer");
+  s.onDecision("r1", "deny");
+  assert.deepEqual(lastAskDone(deps), { requestId: "r1", outcome: "denied", by: "mac" });
+});
+
+// Guards: a decision for a requestId pi-hail never deferred is ignored \u2014 no frame.
+test("onDecision ignores an unknown requestId (no send)", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onDecision("nope", "allow");
+  assert.equal(deps.send.calls.length, 0);
+});
+
+// Guards: a decision arriving after a terminal (non-deferred) answer is ignored,
+// and a deferred ask is closed only once.
+test("onDecision ignores an already-answered ask and fires once", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  const p1 = s.requestPhoneDecision({ requestId: "a", toolName: "bash", command: "x" } as never);
+  deps.ui.openDialog.resolve("Allow"); // terminal allow \u2014 not deferred
+  assert.equal(await p1, "allow");
+  const afterAllow = deps.send.calls.length;
+  s.onDecision("a", "deny");
+  assert.equal(deps.send.calls.length, afterAllow, "a terminal ask must not be re-closed");
+
+  const p2 = s.requestPhoneDecision({ requestId: "b", toolName: "bash", command: "y" } as never);
+  deps.ui.openDialog.resolve("More options\u2026");
+  assert.equal(await p2, "defer");
+  s.onDecision("b", "allow");
+  const afterFirst = deps.send.calls.length;
+  s.onDecision("b", "deny"); // second decision for the same ask is a no-op
+  assert.equal(deps.send.calls.length, afterFirst, "a deferred ask closes only once");
+});
+
 // Guards: a presence frame updates the status line.
 test("onInbound presence sets the status text", () => {
   const deps = fakeDeps();
