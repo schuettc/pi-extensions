@@ -142,21 +142,41 @@ test("a 150 KB / 3000-event streamed turn against a slow reader stays bounded (m
   const session = new Session(deps);
   session.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.4.0", accepted: true, have: 0 } });
 
+  // A single streamed `write` tool call whose partialResult grows to ~150 KB \u2014 the
+  // phone's live tool output (kept, coalesced newest-wins per toolCallId).
+  const makeToolUpdate = (i: number) => {
+    const size = Math.ceil((150 * 1024 * (i + 1)) / N);
+    return {
+      type: "tool_execution_update",
+      toolCallId: "write-1",
+      toolName: "write",
+      args: { path: "/plan.md" },
+      partialResult: { output: "y".repeat(size) },
+    };
+  };
+
   // Compute the naive baseline: what a verbatim forward would have stringified
-  // (every event, full message + its duplicate partial) — the pre-fix cost.
+  // (every message_update, full message + its duplicate partial, plus every tool
+  // update) — the pre-fix cost.
   let baselineBytes = 0;
   const events: unknown[] = [];
+  const toolEvents: unknown[] = [];
   for (let i = 0; i < N; i++) {
     const e = makeUpdate(i, N);
     events.push(e);
+    const t = makeToolUpdate(i);
+    toolEvents.push(t);
     baselineBytes += Buffer.byteLength(encodeLine({ event: e }));
+    baselineBytes += Buffer.byteLength(encodeLine({ event: t }));
   }
 
-  // Stream the turn: message_start, 3000 deltas (~1 ms apart), message_end.
+  // Stream the turn: message_start, 3000 deltas (~1 ms apart) each interleaved
+  // with a tool update, then message_end.
   session.forwardEvent({ type: "message_start", message: { role: "assistant", content: [] } });
   fireDue();
   for (let i = 0; i < N; i++) {
     session.forwardEvent(events[i]);
+    session.forwardEvent(toolEvents[i]);
     nowMs += 1; // deltas arrive ~1 ms apart (far faster than the 250 ms window)
     fireDue();
     // A slow reader consumes the buffer roughly every 500 ms of stream time.
@@ -170,7 +190,7 @@ test("a 150 KB / 3000-event streamed turn against a slow reader stays bounded (m
   const totalBytes = fake.totalBytes;
   const peakBytes = fake.peak;
   const stringifyCountAfter = fake.writes.length; // one encodeLine per written frame
-  const stringifyCountBefore = N; // verbatim forward stringifies every delta
+  const stringifyCountBefore = 2 * N; // verbatim forward stringifies every delta + tool update
   // eslint-disable-next-line no-console
   console.log(
     `[muster #502] stringify count: before=${stringifyCountBefore} after=${stringifyCountAfter}; ` +
@@ -195,24 +215,46 @@ test("a 150 KB / 3000-event streamed turn against a slow reader stays bounded (m
   assert.equal(lastFrame.event.type, "message_end");
   assert.equal(lastFrame.event.message.content[0].text.length, Math.ceil((150 * 1024 * N) / N));
 
-  // The last PROGRESS snapshot before message_end is the newest (newest-wins):
-  // its message equals the final 150 KB snapshot.
-  const progressFrames = fake.writes
+  // The last message_update snapshot before message_end is the newest
+  // (newest-wins): its message equals the final 150 KB snapshot.
+  const parsed = fake.writes
     .slice(0, -1)
-    .map((l) => JSON.parse(l) as { event?: { type?: string; message?: { content?: { text: string }[] } } })
-    .filter((f) => f.event?.type === "message_update");
-  assert.ok(progressFrames.length > 0, "at least one progress frame was delivered");
+    .map(
+      (l) =>
+        JSON.parse(l) as {
+          event?: {
+            type?: string;
+            message?: { content?: { text: string }[] };
+            assistantMessageEvent?: object;
+            partialResult?: { output: string };
+          };
+        },
+    );
+  const progressFrames = parsed.filter((f) => f.event?.type === "message_update");
+  const toolFrames = parsed.filter((f) => f.event?.type === "tool_execution_update");
+  assert.ok(progressFrames.length > 0, "at least one message_update frame was delivered");
+  assert.ok(toolFrames.length > 0, "at least one tool_execution_update frame was delivered");
   const lastProgress = progressFrames[progressFrames.length - 1];
   assert.equal(
     lastProgress.event?.message?.content?.[0].text.length,
     (finalMessage as { content: { text: string }[] }).content[0].text.length,
-    "the last progress snapshot before message_end is the newest",
+    "the last message_update snapshot before message_end is the newest",
   );
 
-  // And no partial duplicate ever rode the wire.
+  // message_update sheds its duplicate cumulative snapshot (assistantMessageEvent.partial)…
   for (const f of progressFrames) {
-    assert.equal("partial" in ((f.event as { assistantMessageEvent?: object }).assistantMessageEvent ?? {}), false);
+    assert.equal("partial" in (f.event?.assistantMessageEvent ?? {}), false);
   }
+  // …but tool_execution_update KEEPS partialResult (the phone's live tool output),
+  // and the last one delivered is the newest 150 KB snapshot.
+  for (const f of toolFrames) {
+    assert.ok(f.event?.partialResult, "tool frames keep partialResult");
+  }
+  assert.equal(
+    toolFrames[toolFrames.length - 1].event?.partialResult?.output.length,
+    Math.ceil((150 * 1024 * N) / N),
+    "the newest tool output snapshot is delivered before message_end",
+  );
 
   socket.close();
 });

@@ -762,9 +762,11 @@ test("stripProgressPartial removes assistantMessageEvent.partial without mutatin
   assert.notEqual(stripped.assistantMessageEvent, event.assistantMessageEvent);
 });
 
-// Guards: tool_execution_update carries a cumulative `partialResult` duplicate;
-// strip it, keep toolCallId/toolName/args, and never mutate the original.
-test("stripProgressPartial removes tool_execution_update.partialResult without mutating the original", () => {
+// Guards: tool_execution_update's `partialResult` is the tool's ONLY live output
+// payload and the phone renders it (client toolOutput reads partialResult), so it
+// must be KEPT verbatim \u2014 pi's WithoutPartial strips only message_update. Growth
+// is bounded by the per-toolCallId throttle + backpressure, not by stripping.
+test("stripProgressPartial keeps tool_execution_update.partialResult (the phone's live tool output)", () => {
   const event = {
     type: "tool_execution_update",
     toolCallId: "t1",
@@ -772,13 +774,12 @@ test("stripProgressPartial removes tool_execution_update.partialResult without m
     args: { path: "/p" },
     partialResult: { output: "y".repeat(1000) },
   };
-  const stripped = stripProgressPartial(event) as Record<string, unknown>;
-  assert.equal("partialResult" in stripped, false);
-  assert.equal(stripped.toolCallId, "t1");
-  assert.equal(stripped.toolName, "write");
-  assert.deepEqual(stripped.args, { path: "/p" });
-  assert.equal("partialResult" in event, true);
-  assert.notEqual(stripped, event);
+  const result = stripProgressPartial(event) as Record<string, unknown>;
+  // partialResult preserved
+  assert.equal("partialResult" in result, true);
+  assert.deepEqual(result.partialResult, { output: "y".repeat(1000) });
+  // and the event passes through unchanged (same reference \u2014 no needless copy / no mutation)
+  assert.equal(result, event);
 });
 
 // Guards: non-progress events and events without the duplicate field pass
@@ -900,10 +901,12 @@ test("tool_execution_update coalesces per toolCallId; message_update tracked sep
   s.forwardEvent(mkUpdate(0));
   advance(250);
   assert.equal(sent.length, 3, "one flushed frame per distinct progress key");
-  // tool a carries its newest, and partialResult is stripped
-  const toolA = (sent as { event: { toolCallId?: string } }[]).find((f) => f.event.toolCallId === "a");
+  // tool a carries its NEWEST partialResult (kept \u2014 it's the phone's live output)
+  const toolA = (sent as { event: { toolCallId?: string; partialResult?: { n: number } } }[]).find(
+    (f) => f.event.toolCallId === "a",
+  );
   assert.ok(toolA);
-  assert.equal("partialResult" in (toolA!.event as Record<string, unknown>), false);
+  assert.deepEqual(toolA!.event.partialResult, { n: 2 });
 });
 
 // ── Commit C: Session respects transport backpressure (muster #502) ──

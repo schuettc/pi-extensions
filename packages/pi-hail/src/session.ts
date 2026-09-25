@@ -20,9 +20,14 @@ export type PhoneDecision = "allow" | "deny" | "defer";
  * `message` (the snapshot the phone renders — KEEP it) and once as
  * `assistantMessageEvent.partial` (a cumulative duplicate). encodeLine →
  * JSON.stringify per delta then makes bytes/turn grow as deltas × size
- * (quadratic). This mirrors pi's own `WithoutPartial` (dist/modes/json-event):
- * drop `assistantMessageEvent.partial` from message_update and the equivalent
- * `partialResult` cumulative duplicate from tool_execution_update.
+ * (quadratic). This mirrors pi's own `WithoutPartial` (dist/modes/json-event),
+ * which strips ONLY message_update's `assistantMessageEvent.partial`.
+ *
+ * tool_execution_update's `partialResult` is deliberately KEPT: it is the tool's
+ * only live output payload and the hail phone renders it (client
+ * state/session.ts `toolOutput` reads `partialResult`). Its growth is already
+ * bounded by the per-toolCallId newest-wins throttle + socket backpressure, so
+ * it never contributes to the quadratic blow-up.
  *
  * Returns a SHALLOW copy (never mutates pi's own event object); `message` and
  * the other kept fields are shared by reference — cheap, and the phone renders
@@ -37,13 +42,6 @@ export function stripProgressPartial(event: unknown): unknown {
     if (ame != null && typeof ame === "object" && "partial" in ame) {
       const { partial: _partial, ...restAme } = ame as Record<string, unknown>;
       return { ...(e as Record<string, unknown>), assistantMessageEvent: restAme };
-    }
-    return event;
-  }
-  if (e.type === "tool_execution_update") {
-    if ("partialResult" in (e as Record<string, unknown>)) {
-      const { partialResult: _partialResult, ...rest } = e as Record<string, unknown>;
-      return rest;
     }
     return event;
   }
@@ -641,6 +639,9 @@ export class Session {
    */
   onTransportDown(): void {
     this.connected = false;
+    // The transport dropped its drain listeners (socket.onDisconnect); forget we
+    // armed one so the next held progress flush re-arms against the new socket.
+    this.drainRegistered = false;
   }
 
   private renderStatus(): void {

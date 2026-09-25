@@ -231,6 +231,9 @@ export class DaemonSocket {
       this.duplex = null;
     }
     this.pendingRegister = null;
+    // Drop backpressure state so nothing lingers after shutdown.
+    this.overHighWater = false;
+    this.drainListeners.length = 0;
   }
 
   private onData(chunk: string): void {
@@ -267,6 +270,11 @@ export class DaemonSocket {
     const wasConnected = this.isConnected;
     this.isConnected = false;
     this.duplex = null;
+    // Reset backpressure state for the next connection: the dead duplex's
+    // buffer is gone, and its drain listeners must not fire against a new one.
+    // The Session re-arms its retry (onTransportDown) after it reconnects.
+    this.overHighWater = false;
+    this.drainListeners.length = 0;
     if (wasConnected) {
       try {
         this.onDown();

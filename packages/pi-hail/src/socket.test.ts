@@ -243,3 +243,21 @@ test("canSendProgress is false while disconnected", async () => {
   assert.equal(sock.canSendProgress(), false);
   sock.close();
 });
+
+// Guards: a disconnect drops backpressure state — stale drain listeners must not
+// fire against a new connection, and overHighWater must not carry over.
+test("disconnect resets overHighWater and drops drain listeners", async () => {
+  const fake = new FakeDuplex();
+  fake.highWaterMark = 100;
+  const sock = await connectedSocket(fake);
+  let drained = 0;
+  sock.onDrain(() => drained++);
+  sock.send({ a: "x".repeat(200) }); // over the mark → gated
+  assert.equal(sock.canSendProgress(), false);
+  fake.emit("close"); // transport drops
+  assert.equal(sock.canSendProgress(), false, "disconnected → no progress");
+  // A late drain from the dead duplex must not reach the (dropped) listener.
+  fake.drain();
+  assert.equal(drained, 0);
+  sock.close();
+});
