@@ -15,8 +15,9 @@ delete process.env.TMUX_PANE;
 class FakeDuplex extends EventEmitter implements Duplex {
   writes: string[] = [];
   ended = false;
-  write(s: string): void {
+  write(s: string): boolean {
     this.writes.push(s);
+    return true;
   }
   end(): void {
     this.ended = true;

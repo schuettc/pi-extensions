@@ -905,3 +905,45 @@ test("tool_execution_update coalesces per toolCallId; message_update tracked sep
   assert.ok(toolA);
   assert.equal("partialResult" in (toolA!.event as Record<string, unknown>), false);
 });
+
+// ── Commit C: Session respects transport backpressure (muster #502) ──
+
+// Guards: while the transport is over its high-water mark, progress is HELD
+// (newest-wins), never written, and delivered only when the transport drains.
+test("progress is held under backpressure and the newest is delivered on drain", () => {
+  let canSend = true;
+  let drainCb: (() => void) | undefined;
+  const { deps, sent, advance } = throttleDeps({
+    canSendProgress: () => canSend,
+    onDrain: (cb) => {
+      drainCb = cb;
+    },
+  });
+  const s = new Session(deps);
+  canSend = false;
+  s.forwardEvent(mkUpdate(0));
+  advance(250); // flush timer fires but the gate holds it
+  assert.equal(sent.length, 0, "nothing written while over the mark");
+  s.forwardEvent(mkUpdate(1)); // newest-wins while held
+  advance(250);
+  assert.equal(sent.length, 0);
+  canSend = true;
+  assert.ok(drainCb, "a drain retry was armed");
+  drainCb!();
+  assert.equal(sent.length, 1, "only the newest held frame is delivered on drain");
+  const f = sent[0] as { event: { message: { content: { text: string }[] } } };
+  assert.equal(f.event.message.content[0].text, "m1");
+});
+
+// Guards: boundary frames are ALWAYS written, even over the high-water mark, and
+// they still flush the newest held progress first (order preserved).
+test("a boundary frame is written even under backpressure, after flushing pending", () => {
+  const { deps, sent } = throttleDeps({ canSendProgress: () => false, onDrain: () => {} });
+  const s = new Session(deps);
+  s.forwardEvent(mkUpdate(3)); // held (gated)
+  s.turnStart(); // boundary → forced flush of pending, then the boundary
+  assert.equal(sent.length, 2);
+  const first = sent[0] as { event?: { type?: string } };
+  assert.equal(first.event?.type, "message_update");
+  assert.deepEqual(sent[1], { turn: "start" });
+});
