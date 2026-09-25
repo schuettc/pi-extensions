@@ -1,21 +1,21 @@
 /**
- * pi-ledger: connects a pi session to ledger (tackle.tools).
+ * pi-docket: connects a pi session to docket (tackle.tools).
  *
  *  - bash tool calls that invoke git or gh are journaled with this pi session
- *    (`ledger record --harness pi`); ledger keeps verbs and targets, never the
+ *    (`docket record --harness pi`); docket keeps verbs and targets, never the
  *    command line.
- *  - the first turn of a session gets the repo briefing (`ledger brief`) as a
+ *  - the first turn of a session gets the repo briefing (`docket brief`) as a
  *    hidden context message.
- *  - session start and shutdown run `ledger sync --no-github` in the
+ *  - session start and shutdown run `docket sync --no-github` in the
  *    background; the 30-minute launchd job does the GitHub refresh.
  *
- * Inert when the ledger binary is missing. Never blocks, throws or prints.
+ * Inert when the docket binary is missing. Never blocks, throws or prints.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { brief, installed, ledgerBin, mentionsGit, record, syncInBackground } from "./ledger.ts";
+import { brief, installed, docketBin, mentionsGit, record, syncInBackground } from "./docket.ts";
 
-export default function ledger(pi: ExtensionAPI) {
-  const bin = ledgerBin();
+export default function docket(pi: ExtensionAPI) {
+  const bin = docketBin();
   if (!installed(bin)) return;
   let cwd = process.cwd();
   let sessionId = "";
@@ -39,7 +39,7 @@ export default function ledger(pi: ExtensionAPI) {
     briefed = true;
     const text = (await brief(bin, cwd)).trim();
     if (!text) return undefined;
-    return { message: { customType: "ledger-brief", content: text, display: false } };
+    return { message: { customType: "docket-brief", content: text, display: false } };
   });
 
   pi.on("session_shutdown", () => syncInBackground(bin));

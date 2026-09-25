@@ -1,15 +1,15 @@
 /**
- * Fire-and-forget calls into the ledger binary. Nothing here throws, blocks a
- * turn, or prints: a missing or failing ledger just means nothing is recorded.
+ * Fire-and-forget calls into the docket binary. Nothing here throws, blocks a
+ * turn, or prints: a missing or failing docket just means nothing is recorded.
  */
 import { spawn, execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/** The ledger binary: $LEDGER_BIN, else ~/.local/bin/ledger. */
-export function ledgerBin(env: NodeJS.ProcessEnv = process.env): string {
-  return env.LEDGER_BIN || join(homedir(), ".local", "bin", "ledger");
+/** The docket binary: $DOCKET_BIN, else ~/.local/bin/docket. */
+export function docketBin(env: NodeJS.ProcessEnv = process.env): string {
+  return env.DOCKET_BIN || join(homedir(), ".local", "bin", "docket");
 }
 
 /** True when the binary exists (the extension stays inert otherwise). */
@@ -22,7 +22,7 @@ export function mentionsGit(command: string): boolean {
   return /(^|[\s;&|(/])(git|gh)(\s|$)/.test(command);
 }
 
-/** The `ledger record --harness pi` payload. */
+/** The `docket record --harness pi` payload. */
 export function recordPayload(command: string, cwd: string): string {
   return JSON.stringify({ command, cwd });
 }
@@ -57,7 +57,7 @@ export function record(bin: string, command: string, cwd: string, sessionId: str
   }
 }
 
-/** Start `ledger sync --no-github` detached. */
+/** Start `docket sync --no-github` detached. */
 export function syncInBackground(bin: string): void {
   try {
     const child = spawn(bin, ["sync", "--no-github"], { stdio: "ignore", detached: true });
