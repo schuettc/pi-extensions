@@ -14,11 +14,24 @@ import {
 
 /** Minimal duplex surface the socket needs; the real one wraps node:net. */
 export interface Duplex {
-  write(s: string): void;
+  /** Returns false when the write buffer is over the stream's highWaterMark. */
+  write(s: string): boolean;
   on(ev: "data", cb: (chunk: string) => void): void;
-  on(ev: "close" | "error", cb: () => void): void;
+  on(ev: "close" | "error" | "drain", cb: () => void): void;
   end(): void;
+  /** Bytes currently buffered (node:net exposes this). Optional for fakes. */
+  writableLength?: number;
+  /** True once the buffer is over the highWaterMark (node:net). Optional. */
+  writableNeedDrain?: boolean;
 }
+
+/**
+ * Backpressure high-water mark for PROGRESS frames (muster #502): while the
+ * write buffer is above this, the Session holds the newest progress frame
+ * instead of piling deltas into an unbounded Node buffer. Boundary frames ignore
+ * this and are always written.
+ */
+export const PROGRESS_HIGH_WATER = 1_000_000;
 
 export type Connect = (path: string) => Promise<Duplex>;
 
@@ -44,13 +57,17 @@ export const realConnect: Connect = (path: string) =>
     const onConnect = () => {
       conn.removeListener("error", onError);
       const duplex: Duplex = {
-        write: (s: string) => {
-          conn.write(s);
-        },
-        on: (ev: "data" | "close" | "error", cb: (...a: never[]) => void) => {
+        write: (s: string) => conn.write(s),
+        on: (ev: "data" | "close" | "error" | "drain", cb: (...a: never[]) => void) => {
           conn.on(ev, cb as (...a: unknown[]) => void);
         },
         end: () => conn.end(),
+        get writableLength() {
+          return conn.writableLength;
+        },
+        get writableNeedDrain() {
+          return conn.writableNeedDrain;
+        },
       };
       resolve(duplex);
     };
@@ -81,6 +98,10 @@ export class DaemonSocket {
   private duplex: Duplex | null = null;
   private buffer = "";
   private isConnected = false;
+  /** Set when write() reported the buffer full; cleared on the next 'drain'. */
+  private overHighWater = false;
+  /** Session-registered retries, invoked when the duplex drains. */
+  private readonly drainListeners: (() => void)[] = [];
   private closed = false;
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -129,6 +150,8 @@ export class DaemonSocket {
     duplex.on("data", (chunk: string) => this.onData(chunk));
     duplex.on("close", () => this.onDisconnect());
     duplex.on("error", () => this.onDisconnect());
+    duplex.on("drain", () => this.onDrainEvent());
+    this.overHighWater = false;
 
     // Best-effort write of the register frame.
     try {
@@ -140,11 +163,13 @@ export class DaemonSocket {
     return replyPromise;
   }
 
-  /** Best-effort send; a silent no-op while disconnected. */
+  /** Best-effort send; a silent no-op while disconnected. Tracks write()'s
+   *  return so canSendProgress() can gate progress when the buffer fills. */
   send(obj: unknown): void {
     if (!this.isConnected || !this.duplex) return;
     try {
-      this.duplex.write(encodeLine(obj));
+      const ok = this.duplex.write(encodeLine(obj));
+      if (ok === false) this.overHighWater = true;
     } catch {
       // never throw into pi
     }
@@ -152,6 +177,37 @@ export class DaemonSocket {
 
   connected(): boolean {
     return this.isConnected;
+  }
+
+  /**
+   * Whether a PROGRESS frame may be written now (muster #502). False while
+   * disconnected, while write() last reported the buffer full (until 'drain'),
+   * or while the buffered byte count is over PROGRESS_HIGH_WATER. Boundary frames
+   * do NOT consult this \u2014 they are always written via send().
+   */
+  canSendProgress(): boolean {
+    if (!this.isConnected || !this.duplex) return false;
+    if (this.overHighWater) return false;
+    if (this.duplex.writableNeedDrain) return false;
+    if ((this.duplex.writableLength ?? 0) > PROGRESS_HIGH_WATER) return false;
+    return true;
+  }
+
+  /** Register a callback invoked whenever the duplex drains (the Session uses
+   *  this to retry a held progress flush). */
+  onDrain(cb: () => void): void {
+    this.drainListeners.push(cb);
+  }
+
+  private onDrainEvent(): void {
+    this.overHighWater = false;
+    for (const cb of this.drainListeners) {
+      try {
+        cb();
+      } catch {
+        // never throw into pi
+      }
+    }
   }
 
   /** Schedule a reconnect with backoff; caller re-registers via onReconnect. */
@@ -175,6 +231,9 @@ export class DaemonSocket {
       this.duplex = null;
     }
     this.pendingRegister = null;
+    // Drop backpressure state so nothing lingers after shutdown.
+    this.overHighWater = false;
+    this.drainListeners.length = 0;
   }
 
   private onData(chunk: string): void {
@@ -211,6 +270,11 @@ export class DaemonSocket {
     const wasConnected = this.isConnected;
     this.isConnected = false;
     this.duplex = null;
+    // Reset backpressure state for the next connection: the dead duplex's
+    // buffer is gone, and its drain listeners must not fire against a new one.
+    // The Session re-arms its retry (onTransportDown) after it reconnects.
+    this.overHighWater = false;
+    this.drainListeners.length = 0;
     if (wasConnected) {
       try {
         this.onDown();

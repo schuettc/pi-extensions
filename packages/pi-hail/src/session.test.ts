@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Session } from "./session.ts";
+import { Session, stripProgressPartial } from "./session.ts";
 import { EXTENSION_VERSION } from "./version.ts";
 import { fakeDeps, lastSend, makeOpenDialogFake } from "./test-helpers.ts";
 
@@ -729,4 +729,224 @@ test("buildRegisterArgs threads the register cursor (getEntries().length)", () =
     cursor: r.deps.getEntries().length,
   });
   assert.equal(args.cursor, 3);
+});
+
+// ── Commit A: strip duplicate partial snapshots from progress events (muster #502) ──
+
+// Guards: pi's message_update carries the FULL partial message twice (`message`
+// and `assistantMessageEvent.partial`); forwarding both makes bytes/turn grow
+// quadratically. Strip the duplicate `partial`, KEEP `message` (the phone
+// renders from it), and never mutate pi's own event object.
+test("stripProgressPartial removes assistantMessageEvent.partial without mutating the original", () => {
+  const partial = { role: "assistant", content: [{ type: "text", text: "x".repeat(1000) }] };
+  const message = { role: "assistant", content: [{ type: "text", text: "x".repeat(1000) }] };
+  const event = {
+    type: "message_update",
+    message,
+    assistantMessageEvent: { type: "text_delta", delta: "x", partial },
+  };
+  const stripped = stripProgressPartial(event) as {
+    type: string;
+    message: unknown;
+    assistantMessageEvent: Record<string, unknown>;
+  };
+  // partial gone from the copy…
+  assert.equal("partial" in stripped.assistantMessageEvent, false);
+  // …message kept (same reference is fine — it's the snapshot the phone renders)…
+  assert.equal(stripped.message, message);
+  assert.equal(stripped.assistantMessageEvent.type, "text_delta");
+  assert.equal(stripped.assistantMessageEvent.delta, "x");
+  // …and pi's original event is untouched (no mutation).
+  assert.equal("partial" in event.assistantMessageEvent, true);
+  assert.notEqual(stripped, event);
+  assert.notEqual(stripped.assistantMessageEvent, event.assistantMessageEvent);
+});
+
+// Guards: tool_execution_update's `partialResult` is the tool's ONLY live output
+// payload and the phone renders it (client toolOutput reads partialResult), so it
+// must be KEPT verbatim \u2014 pi's WithoutPartial strips only message_update. Growth
+// is bounded by the per-toolCallId throttle + backpressure, not by stripping.
+test("stripProgressPartial keeps tool_execution_update.partialResult (the phone's live tool output)", () => {
+  const event = {
+    type: "tool_execution_update",
+    toolCallId: "t1",
+    toolName: "write",
+    args: { path: "/p" },
+    partialResult: { output: "y".repeat(1000) },
+  };
+  const result = stripProgressPartial(event) as Record<string, unknown>;
+  // partialResult preserved
+  assert.equal("partialResult" in result, true);
+  assert.deepEqual(result.partialResult, { output: "y".repeat(1000) });
+  // and the event passes through unchanged (same reference \u2014 no needless copy / no mutation)
+  assert.equal(result, event);
+});
+
+// Guards: non-progress events and events without the duplicate field pass
+// through unchanged (same reference — no needless copy).
+test("stripProgressPartial passes non-progress events through unchanged", () => {
+  const start = { type: "message_start", message: { role: "assistant" } };
+  assert.equal(stripProgressPartial(start), start);
+  const noPartial = { type: "message_update", message: {}, assistantMessageEvent: { type: "text_delta" } };
+  assert.equal(stripProgressPartial(noPartial), noPartial);
+});
+
+// ── Commit B: throttle progress events newest-wins (muster #502) ──
+
+/** A controllable clock + trailing-flush timer for the progress throttle, plus
+ *  a recording send. No real time passes; `advance(ms)` fires due timers. */
+function throttleDeps(opts: { canSendProgress?: () => boolean; onDrain?: (cb: () => void) => void } = {}) {
+  const sent: unknown[] = [];
+  let nowMs = 0;
+  interface T {
+    fireAt: number;
+    cb: () => void;
+    cancelled: boolean;
+  }
+  const timers: T[] = [];
+  const deps = {
+    send: (o: unknown) => sent.push(o),
+    sendUserMessage: () => {},
+    ui: {
+      setStatus: () => {},
+      notify: () => {},
+      holdInput: () => {},
+      openDialog: () => new Promise<string | undefined>(() => {}),
+    },
+    getEntries: () => [] as unknown[],
+    now: () => nowMs,
+    setTimer: (cb: () => void, ms: number): T => {
+      const t: T = { fireAt: nowMs + ms, cb, cancelled: false };
+      timers.push(t);
+      return t;
+    },
+    clearTimer: (t: T) => {
+      t.cancelled = true;
+    },
+    ...(opts.canSendProgress ? { canSendProgress: opts.canSendProgress } : {}),
+    ...(opts.onDrain ? { onDrain: opts.onDrain } : {}),
+  } as unknown as SessionDeps;
+  const advance = (ms: number) => {
+    nowMs += ms;
+    // Fire due timers in scheduled order; a timer may schedule another.
+    for (let i = 0; i < timers.length; i++) {
+      const t = timers[i];
+      if (!t.cancelled && t.fireAt <= nowMs) {
+        t.cancelled = true;
+        t.cb();
+      }
+    }
+  };
+  return { deps, sent, advance, setNow: (v: number) => (nowMs = v) };
+}
+
+const mkUpdate = (i: number) => ({
+  type: "message_update",
+  message: { role: "assistant", content: [{ type: "text", text: `m${i}` }] },
+  assistantMessageEvent: { type: "text_delta", delta: `${i}`, partial: { big: "x".repeat(500) } },
+});
+
+// Guards: a burst of message_update deltas is coalesced newest-wins and flushed
+// once when the trailing 250ms timer fires (bytes/turn stops being quadratic).
+test("message_update progress is coalesced newest-wins and flushed on the 250ms timer", () => {
+  const { deps, sent, advance } = throttleDeps();
+  const s = new Session(deps);
+  for (let i = 0; i < 5; i++) s.forwardEvent(mkUpdate(i));
+  assert.equal(sent.length, 0, "held until the flush timer fires");
+  advance(250);
+  assert.equal(sent.length, 1, "exactly one flush carrying the newest");
+  const frame = sent[0] as { event: { message: { content: { text: string }[] }; assistantMessageEvent: Record<string, unknown> } };
+  assert.equal(frame.event.message.content[0].text, "m4", "the newest snapshot wins");
+  assert.equal("partial" in frame.event.assistantMessageEvent, false, "and it is stripped");
+});
+
+// Guards: flushes happen at most every 250ms — a second burst inside the window
+// is still held until the window elapses.
+test("progress flushes at most once per 250ms window", () => {
+  const { deps, sent, advance } = throttleDeps();
+  const s = new Session(deps);
+  s.forwardEvent(mkUpdate(0));
+  advance(250); // first flush
+  assert.equal(sent.length, 1);
+  s.forwardEvent(mkUpdate(1));
+  advance(100); // inside the window → still held
+  assert.equal(sent.length, 1);
+  advance(150); // window elapsed → second flush
+  assert.equal(sent.length, 2);
+});
+
+// Guards: a non-progress (boundary) frame flushes pending progress FIRST so the
+// wire order is preserved (boundary events must never be reordered).
+test("a boundary frame flushes pending progress first, preserving order", () => {
+  const { deps, sent } = throttleDeps();
+  const s = new Session(deps);
+  s.forwardEvent(mkUpdate(0));
+  s.forwardEvent(mkUpdate(1)); // coalesced, still held
+  s.turnEnd(); // boundary
+  assert.equal(sent.length, 2);
+  const first = sent[0] as { event?: { type?: string; message?: { content: { text: string }[] } } };
+  assert.equal(first.event?.type, "message_update");
+  assert.equal(first.event?.message?.content[0].text, "m1", "the newest snapshot precedes the boundary");
+  assert.deepEqual(sent[1], { turn: "end" });
+});
+
+// Guards: tool_execution_update is coalesced per toolCallId, and message_update
+// is tracked as its own kind — distinct keys each flush their own newest frame.
+test("tool_execution_update coalesces per toolCallId; message_update tracked separately", () => {
+  const { deps, sent, advance } = throttleDeps();
+  const s = new Session(deps);
+  s.forwardEvent({ type: "tool_execution_update", toolCallId: "a", toolName: "w", args: {}, partialResult: { n: 1 } });
+  s.forwardEvent({ type: "tool_execution_update", toolCallId: "a", toolName: "w", args: {}, partialResult: { n: 2 } });
+  s.forwardEvent({ type: "tool_execution_update", toolCallId: "b", toolName: "w", args: {}, partialResult: { n: 1 } });
+  s.forwardEvent(mkUpdate(0));
+  advance(250);
+  assert.equal(sent.length, 3, "one flushed frame per distinct progress key");
+  // tool a carries its NEWEST partialResult (kept \u2014 it's the phone's live output)
+  const toolA = (sent as { event: { toolCallId?: string; partialResult?: { n: number } } }[]).find(
+    (f) => f.event.toolCallId === "a",
+  );
+  assert.ok(toolA);
+  assert.deepEqual(toolA!.event.partialResult, { n: 2 });
+});
+
+// ── Commit C: Session respects transport backpressure (muster #502) ──
+
+// Guards: while the transport is over its high-water mark, progress is HELD
+// (newest-wins), never written, and delivered only when the transport drains.
+test("progress is held under backpressure and the newest is delivered on drain", () => {
+  let canSend = true;
+  let drainCb: (() => void) | undefined;
+  const { deps, sent, advance } = throttleDeps({
+    canSendProgress: () => canSend,
+    onDrain: (cb) => {
+      drainCb = cb;
+    },
+  });
+  const s = new Session(deps);
+  canSend = false;
+  s.forwardEvent(mkUpdate(0));
+  advance(250); // flush timer fires but the gate holds it
+  assert.equal(sent.length, 0, "nothing written while over the mark");
+  s.forwardEvent(mkUpdate(1)); // newest-wins while held
+  advance(250);
+  assert.equal(sent.length, 0);
+  canSend = true;
+  assert.ok(drainCb, "a drain retry was armed");
+  drainCb!();
+  assert.equal(sent.length, 1, "only the newest held frame is delivered on drain");
+  const f = sent[0] as { event: { message: { content: { text: string }[] } } };
+  assert.equal(f.event.message.content[0].text, "m1");
+});
+
+// Guards: boundary frames are ALWAYS written, even over the high-water mark, and
+// they still flush the newest held progress first (order preserved).
+test("a boundary frame is written even under backpressure, after flushing pending", () => {
+  const { deps, sent } = throttleDeps({ canSendProgress: () => false, onDrain: () => {} });
+  const s = new Session(deps);
+  s.forwardEvent(mkUpdate(3)); // held (gated)
+  s.turnStart(); // boundary → forced flush of pending, then the boundary
+  assert.equal(sent.length, 2);
+  const first = sent[0] as { event?: { type?: string } };
+  assert.equal(first.event?.type, "message_update");
+  assert.deepEqual(sent[1], { turn: "start" });
 });

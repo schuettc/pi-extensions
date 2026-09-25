@@ -216,6 +216,11 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
 
       const sessionDeps: SessionDeps = {
         send: (obj) => socket?.send(obj),
+        // Progress backpressure (muster #502): the Session holds the newest
+        // progress frame while the socket's write buffer is over its high-water
+        // mark, and retries when the socket drains. Boundary frames ignore this.
+        canSendProgress: () => socket?.canSendProgress() ?? false,
+        onDrain: (cb) => socket?.onDrain(cb),
         sendUserMessage: (text) => pi.sendUserMessage(text),
         ui: {
           setStatus: (text) => c.ui.setStatus("pi-hail", text),
