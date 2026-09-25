@@ -1,10 +1,12 @@
-// pi-hail's live-authority chain link. During a phone-driven turn it holds the
-// permission ask open until the phone (or the local user) answers, falling back
-// to pi's own prompt (`defer`) on timeout — so a gate never hangs and, outside a
-// phone turn, pi/pi-auto-review decide normally. Registered into
-// @gotgenes/pi-permission-system's authorizer chain by the extension entry
-// (Task 10); this module is the pure link + factory, unit-tested with no real
-// permission system.
+// pi-hail's live-authority chain link. It is a thin delegator: `authorize`
+// asks the session to open the ask on both surfaces (phone + Mac dialog) and
+// awaits the first answer, then maps the session's verdict to a chain verdict —
+// allow→allow, deny→deny (with a teaching reason the model sees), defer→defer
+// (the safe, non-interfering default that passes the ask to the next link, e.g.
+// the permission system's own dialog). There is no timeout: the session awaits
+// a human on either device. Registered into @gotgenes/pi-permission-system's
+// authorizer chain by the extension entry; this module is the pure link +
+// factory, unit-tested with no real permission system.
 
 import type {
   Authorizer,
@@ -17,41 +19,29 @@ import type { Session } from "./session.ts";
 
 export interface PhoneAuthorizerDeps {
   session: Session;
-  /** How long to hold a gate open for the phone before deferring to pi's prompt. */
-  timeoutMs: number;
 }
 
 /**
- * Build the phone authorizer link. Its `authorize` asks the session for a phone
- * decision and maps it to a verdict: allow→allow, deny→deny (with a teaching
- * reason the model sees), everything else / timeout→defer (the safe,
- * non-interfering default that passes the ask to the next chain link).
+ * Build the phone authorizer link. Its `authorize` delegates to the session's
+ * first-answer-wins decision and maps it to a verdict. `requestPhoneDecision`
+ * never throws, but a thrown decision still becomes a defer so pi's own prompt
+ * runs.
  */
 export function createPhoneAuthorizer(deps: PhoneAuthorizerDeps): {
   authorize: Authorizer["authorize"];
 } {
-  const { session, timeoutMs } = deps;
+  const { session } = deps;
   return {
     async authorize(
       details: PromptPermissionDetails,
       _query: PermissionQuery,
       _log: AuthorizerLog,
     ): Promise<AuthorizerVerdict> {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeoutP = new Promise<"defer">((resolve) => {
-        timer = setTimeout(() => resolve("defer"), timeoutMs);
-        // Our timeout must never keep pi's event loop alive on its own.
-        if (typeof timer?.unref === "function") timer.unref();
-      });
       let decision: "allow" | "deny" | "defer";
       try {
-        decision = await Promise.race([session.requestPhoneDecision(details), timeoutP]);
+        decision = await session.requestPhoneDecision(details);
       } catch {
-        // requestPhoneDecision never throws, but stay safe: a thrown decision
-        // becomes a defer so pi's own prompt still runs.
         decision = "defer";
-      } finally {
-        if (timer) clearTimeout(timer);
       }
       if (decision === "allow") return { kind: "allow" };
       if (decision === "deny") return { kind: "deny", reason: "denied on phone" };

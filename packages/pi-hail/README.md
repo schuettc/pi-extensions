@@ -14,6 +14,28 @@ Add the extension to `~/.pi/agent/settings.json`:
 
 The extension loads on every pi session but is inert unless it owns an interactive TUI pane and the hail daemon is running. A missing or slow daemon never blocks pi.
 
+### Required: answer approvals from your phone (0.4.0)
+
+To let a paired phone answer a permission ask (allow/deny) as well as your Mac,
+add `"pi-hail"` **after** `"pi-auto-review"` in the permission system's authorizer
+chain, in `~/.pi/agent/extensions/pi-permission-system/config.json`:
+
+```json
+{
+  "authorizerChain": ["pi-auto-review", "pi-hail"]
+}
+```
+
+Order matters: `pi-auto-review` decides first, and only the asks it defers (the
+ones that would otherwise prompt you) reach `pi-hail`, which opens the ask on
+your phone and your Mac at once — the first answer on either device wins, with
+no timeout. Choosing **More options…** on the Mac hands the ask back to the
+permission system's full dialog (session-scope grants, etc.).
+
+The permission system exposes no reader for its chain, so pi-hail cannot detect a
+missing entry: **this README is the only guard.** Without the entry, asks are
+answered on your Mac exactly as before — phone approvals simply do nothing.
+
 ## Connect / Disconnect (0.3.0)
 
 Sessions running inside tmux under proj's `project/work` naming stream to your
@@ -37,8 +59,13 @@ Daemon replies with `{ "ok": true, "data": { "hostId", "daemonVersion", "accepte
 
 **Then, one object per line, both directions:**
 
-- **extension → daemon:** `{ "event": <pi rpc event verbatim> }` · `{ "turn": "start" | "end" }` · `{ "lock": "held" | "released" }` · `{ "exit": { "code": n } }` · `{ "refused": { "requestId", "reason": "turn_running" } }`
-- **daemon → extension:** `{ "prompt": { "text", "from", "requestId" } }` · `{ "presence": { "phones": [ ... ] } }` · `{ "answer": { "requestId", "value" } }` · `{ "ctl": "stop" }`
+- **extension → daemon:** `{ "event": <pi rpc event verbatim> }` · `{ "turn": "start" | "end" }` · `{ "lock": "held" | "released" }` · `{ "exit": { "code": n } }` · `{ "refused": { "requestId", "reason": "turn_running" } }` · `{ "ask": { "requestId", "title", "message", "toolName"?, "surface"?, "value"? } }` · `{ "askDone": { "requestId", "outcome": "allowed" | "denied" | "deferred", "by": "mac" | "phone" } }`
+- **daemon → extension:** `{ "prompt": { "text", "from", "requestId" } }` · `{ "presence": { "phones": [ ... ] } }` · `{ "answer": { "requestId", "value": "allow" | "deny" } }` · `{ "ctl": "stop" }`
+
+An `ask`/`askDone` pair brackets a permission approval: `ask` opens the request
+on the phone (rendered as a confirm card) while pi-hail also opens a Mac dialog;
+the daemon relays the phone's answer back as `{ answer }`, and `askDone` closes
+the request on whichever device did not answer first.
 
 The extension refuses a phone `prompt` while the local turn runs; while a phone-originated turn runs, it holds local terminal input behind a visible notice and replays it when the phone's turn ends.
 

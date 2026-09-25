@@ -8,7 +8,12 @@ function sessionWithSends() {
   const deps: SessionDeps = {
     send: (o) => sent.push(o),
     sendUserMessage: () => {},
-    ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {} },
+    ui: {
+      setStatus: () => {},
+      notify: () => {},
+      holdInput: () => {},
+      openDialog: () => Promise.resolve(undefined),
+    },
     getEntries: () => [],
   };
   return { session: new Session(deps), sent };

@@ -147,10 +147,24 @@ test(
       // healthy and the process keeps running.
       socket.send({ turn: "start" });
       socket.send({ event: { type: "message_start", message: { role: "assistant" } } });
+      // An approval ask + its close (spec \u00a7A): the daemon marks the request open
+      // with no fail-closed timer, then closes it on askDone. Older daemons that
+      // predate these keys ignore them, so the stream stays healthy either way.
+      socket.send({
+        ask: {
+          requestId: "it-ask-1",
+          title: "Allow bash?",
+          message: "echo hi",
+          toolName: "bash",
+          surface: "bash",
+          value: "echo hi",
+        },
+      });
+      socket.send({ askDone: { requestId: "it-ask-1", outcome: "deferred", by: "mac" } });
       socket.send({ turn: "end" });
       await new Promise((r) => setTimeout(r, 300));
 
-      assert.ok(socket.connected(), "socket dropped after streaming turn/event frames");
+      assert.ok(socket.connected(), "socket dropped after streaming turn/event/ask frames");
       assert.ok(daemon.pid && isAlive(daemon.pid), "daemon exited while streaming frames");
 
       // A clean exit frame closes the session from the extension side.

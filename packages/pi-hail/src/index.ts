@@ -24,7 +24,6 @@ export interface ExtensionDeps {
   getTmuxSessionId?: () => string | undefined;
   /** Test seam: tmux facts for this pane (defaults to one `tmux display-message`). */
   getTmuxFacts?: () => TmuxFacts;
-  timeoutMs?: number;
 }
 
 // Every handler is best-effort: it sits directly on a pi lifecycle event, and a
@@ -145,7 +144,6 @@ const FORWARDED_EVENTS = [
 export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   const connect = deps.connect ?? realConnect;
   const socketPath = deps.socketPath;
-  const timeoutMs = deps.timeoutMs ?? 30000;
 
   // Ownership is captured at the one session_start that owns the pane; a
   // subagent node's stays false, so its events and bus registrations are inert.
@@ -182,6 +180,11 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         ui: {
           setStatus: (key: string, text: string | undefined) => void;
           notify: (msg: string, level: "info" | "warning" | "error") => void;
+          select: (
+            title: string,
+            options: string[],
+            opts?: { signal?: AbortSignal },
+          ) => Promise<string | undefined>;
         };
       };
 
@@ -220,6 +223,9 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
           holdInput: (held) => {
             heldFlag = held;
           },
+          // The Mac side of an ask: a select dialog we can dismiss the moment
+          // the phone answers first (spec \u00a7A). Never throws into the Session.
+          openDialog: (title, options, signal) => c.ui.select(title, options, { signal }),
         },
         getEntries,
       };
@@ -229,7 +235,10 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         connect,
         path: socketPath,
         onLine: (msg) => safe(() => session?.onInbound(msg)),
-        onDown: () => {},
+        // A control-socket drop means the daemon is unreachable: fall back to
+        // NOT connected so permission asks defer to pi's normal prompt until a
+        // reconnect + re-register is re-affirmed by the daemon.
+        onDown: () => safe(() => session?.onTransportDown()),
         // The session knows the register args + replay cursor; re-register on
         // reconnect (which triggers replay after the daemon's `have` cursor).
         onReconnect: () => register(),
@@ -343,16 +352,21 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         }
         return;
       }
-      const authorizer = createPhoneAuthorizer({ session: currentSession, timeoutMs });
+      const authorizer = createPhoneAuthorizer({ session: currentSession });
       authorizerDispose = service.registerAuthorizer("pi-hail", authorizer.authorize);
     }),
   );
 
-  // Forward the prompt UI so the phone sees the gate it is being asked about.
-  pi.events?.on?.("permissions:ui_prompt", (data: unknown) =>
+  // Close a deferred ask when the permission system's own dialog decides it
+  // (permissions:decision). pi-hail no longer forwards permissions:ui_prompt:
+  // the daemon renders the ask from pi-hail's { ask } frame instead, so that
+  // announcement would only produce a blank phantom card.
+  pi.events?.on?.("permissions:decision", (data: unknown) =>
     safe(() => {
       if (!ownsThisPane || !session) return;
-      session.forwardEvent({ type: "permissions:ui_prompt", payload: data });
+      const d = data as { requestId?: string; result?: string } | null;
+      if (!d?.requestId || (d.result !== "allow" && d.result !== "deny")) return;
+      session.onDecision(d.requestId, d.result);
     }),
   );
 }
