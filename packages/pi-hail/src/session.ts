@@ -79,8 +79,20 @@ export class Session {
   private heldInput: string[] = [];
   /** Last-seen presence, for status-line idempotence. */
   private lastPresence: PresenceState = "offline";
-  /** True while the daemon reports this session disconnected from phones. */
-  private disconnected = false;
+  /**
+   * True ONLY after the daemon affirms this session is connected to phones
+   * ({connection:"connected"}). Defaults NOT connected: until the daemon says
+   * so \u2014 and again after any disconnected / unavailable frame or a control-socket
+   * drop \u2014 a permission ask defers to pi's normal prompt instead of opening a
+   * phone ask. The daemon sends this affirmation on every accepted register.
+   */
+  private connected = false;
+  /**
+   * True only when the daemon EXPLICITLY reported "disconnected". Drives the
+   * status line: the unknown / no-daemon / socket-drop state keeps the presence
+   * text; only an explicit disconnect shows CONNECTION_STATUS_DISCONNECTED.
+   */
+  private explicitlyDisconnected = false;
   /** Last presence-derived status text, restored when the session is shown. */
   private presenceText: string | undefined = undefined;
 
@@ -257,10 +269,16 @@ export class Session {
     }
     if ("connection" in m) {
       const v = m.connection;
-      if (v === "connected" || v === "disconnected") {
-        this.disconnected = v === "disconnected";
+      if (v === "connected") {
+        this.connected = true;
+        this.explicitlyDisconnected = false;
+        this.renderStatus();
+      } else if (v === "disconnected") {
+        this.connected = false;
+        this.explicitlyDisconnected = true;
         this.renderStatus();
       } else if (v === "unavailable") {
+        this.connected = false;
         this.deps.ui.notify(
           "hail: this session isn't shared with your phone (only proj/tmux sessions can connect).",
           "info",
@@ -291,8 +309,8 @@ export class Session {
   }
 
   /**
-   * A permission gate reaching pi-hail's chain link. When inert, or when the
-   * daemon reports this session disconnected from phones, resolve "defer"
+   * A permission gate reaching pi-hail's chain link. When inert, or until the
+   * daemon has affirmed this session is connected to phones, resolve "defer"
    * immediately so the permission system's own Mac dialog runs unchanged. Only
    * asks auto-review already deferred reach here.
    *
@@ -306,7 +324,7 @@ export class Session {
    * throws (a dangling decision at session end only ever resolves).
    */
   requestPhoneDecision(details: PromptPermissionDetails): Promise<PhoneDecision> {
-    if (!this.isActive || this.disconnected) {
+    if (!this.isActive || !this.connected) {
       return Promise.resolve("defer");
     }
     const requestId = details.requestId;
@@ -400,8 +418,18 @@ export class Session {
     this.deps.send({ resend: "done" });
   }
 
+  /**
+   * The control socket dropped (daemon unreachable). Fall back to NOT connected
+   * so a permission ask defers to pi's normal prompt until a re-register is
+   * affirmed by the daemon. Deliberately does NOT touch the status line: a
+   * transport drop is the unknown state, not an explicit "disconnected".
+   */
+  onTransportDown(): void {
+    this.connected = false;
+  }
+
   private renderStatus(): void {
-    if (this.disconnected) {
+    if (this.explicitlyDisconnected) {
       this.deps.ui.setStatus(CONNECTION_STATUS_DISCONNECTED);
       return;
     }

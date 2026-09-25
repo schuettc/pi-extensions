@@ -14,6 +14,7 @@ function fakeLog(): AuthorizerLog {
 test("authorize returns allow when the session decides allow", async () => {
   const deps = fakeDeps();
   const s = new Session(deps);
+  s.onInbound({ connection: "connected" });
   const auth = createPhoneAuthorizer({ session: s });
   const p = auth.authorize({ requestId: "r9", toolName: "bash" } as never, {} as never, fakeLog());
   s.onInbound({ answer: { requestId: "r9", value: "allow" } });
@@ -24,18 +25,19 @@ test("authorize returns allow when the session decides allow", async () => {
 test("authorize returns deny with a teaching reason", async () => {
   const deps = fakeDeps();
   const s = new Session(deps);
+  s.onInbound({ connection: "connected" });
   const auth = createPhoneAuthorizer({ session: s });
   const p = auth.authorize({ requestId: "r9", toolName: "bash" } as never, {} as never, fakeLog());
   deps.ui.openDialog.resolve("Deny");
   assert.deepEqual(await p, { kind: "deny", reason: "denied on phone" });
 });
 
-// Guards: a disconnected session yields to pi's own prompt (defer) — the link
-// never intercepts an ask it cannot render on a phone.
-test("authorize defers when the session is disconnected", async () => {
+// Guards: an unaffirmed / disconnected session yields to pi's own prompt
+// (defer) — the link never intercepts an ask it cannot render on a phone.
+test("authorize defers when the session is not affirmed connected", async () => {
   const deps = fakeDeps();
   const s = new Session(deps);
-  s.onInbound({ connection: "disconnected" });
+  // No {connection:"connected"} affirmation \u2014 stays deferred.
   const auth = createPhoneAuthorizer({ session: s });
   assert.deepEqual(
     await auth.authorize({ requestId: "r" } as never, {} as never, fakeLog()),
@@ -47,6 +49,7 @@ test("authorize defers when the session is disconnected", async () => {
 test("authorize defers when the Mac dialog chooses More options…", async () => {
   const deps = fakeDeps();
   const s = new Session(deps);
+  s.onInbound({ connection: "connected" });
   const auth = createPhoneAuthorizer({ session: s });
   const p = auth.authorize({ requestId: "r9", toolName: "bash" } as never, {} as never, fakeLog());
   deps.ui.openDialog.resolve("More options…");

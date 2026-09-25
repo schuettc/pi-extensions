@@ -235,7 +235,10 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         connect,
         path: socketPath,
         onLine: (msg) => safe(() => session?.onInbound(msg)),
-        onDown: () => {},
+        // A control-socket drop means the daemon is unreachable: fall back to
+        // NOT connected so permission asks defer to pi's normal prompt until a
+        // reconnect + re-register is re-affirmed by the daemon.
+        onDown: () => safe(() => session?.onTransportDown()),
         // The session knows the register args + replay cursor; re-register on
         // reconnect (which triggers replay after the daemon's `have` cursor).
         onReconnect: () => register(),

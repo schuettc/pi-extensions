@@ -316,6 +316,10 @@ test("permissions:decision closes a deferred ask on the wire (allowed/mac)", asy
   await tick();
   fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
   await tick();
+  // The daemon affirms the session is connected to phones (sent on every
+  // accepted register); only then does pi-hail open a phone ask.
+  fake.push('{"connection":"connected"}\n');
+  await tick();
   fireBus("permissions:ready", { sessionId: "S" });
   await tick();
   assert.ok(authorize, "expected the extension to register an authorizer");
@@ -334,6 +338,60 @@ test("permissions:decision closes a deferred ask on the wire (allowed/mac)", asy
   // allowed/mac \u2014 assert the final close.
   assert.deepEqual(askDones.at(-1), { requestId: "r1", outcome: "allowed", by: "mac" });
   assert.deepEqual(askDones.at(0), { requestId: "r1", outcome: "deferred", by: "mac" });
+});
+
+// Guards (fix): when the control socket drops, pi-hail falls back to NOT
+// connected \u2014 an ask defers to pi's normal prompt without opening a phone ask or
+// a Mac dialog, until the daemon re-affirms the session.
+test("a dropped socket makes pi-hail defer asks (no ask frame, no Mac dialog)", async () => {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  let authorize:
+    | ((d: unknown, q: unknown, l: unknown) => Promise<{ kind: string }>)
+    | undefined;
+  const service = {
+    registerAuthorizer: (_name: string, fn: typeof authorize) => {
+      authorize = fn;
+      return () => {};
+    },
+  };
+  const selectCalls: string[] = [];
+  const select = (title: string) => {
+    selectCalls.push(title);
+    return new Promise<string | undefined>(() => {});
+  };
+  const ctx = makeCtx({
+    ui: { setStatus: spy<[string, unknown]>(), notify: spy<[string, unknown]>(), select },
+  });
+  createExtension(pi, {
+    connect: async () => fake,
+    getPermissionsService: () => service as never,
+  });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fake.push('{"connection":"connected"}\n');
+  await tick();
+  fireBus("permissions:ready", { sessionId: "S" });
+  await tick();
+  assert.ok(authorize);
+  // The control socket drops (daemon unreachable).
+  fake.emit("close");
+  await tick();
+  const before = fake.writes.length;
+  const verdict = await authorize({ requestId: "r9", toolName: "bash", command: "rm x" }, {}, {
+    review() {},
+    debug() {},
+  });
+  assert.deepEqual(verdict, { kind: "defer" });
+  assert.equal(selectCalls.length, 0, "no Mac dialog while disconnected");
+  const askFrames = fake.writes
+    .slice(before)
+    .map((w) => JSON.parse(w))
+    .filter((f) => f.ask !== undefined);
+  assert.equal(askFrames.length, 0, "no { ask } frame while disconnected");
 });
 
 // Guards: pi quit emits an exit frame with the code.
