@@ -8,6 +8,6 @@ test("EXTENSION_VERSION matches package.json", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.name, "pi-hail");
   assert.equal(EXTENSION_VERSION, pkg.version);
-  assert.equal(EXTENSION_VERSION, "0.4.0");
+  assert.equal(EXTENSION_VERSION, "0.4.1");
   assert.match(EXTENSION_VERSION, /^\d+\.\d+\.\d+/);
 });
