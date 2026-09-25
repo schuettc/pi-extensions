@@ -56,6 +56,17 @@ export type Phase = "idle" | "local_turn" | "phone_turn";
 /** Status-line text while the daemon has this session disconnected from phones. */
 export const CONNECTION_STATUS_DISCONNECTED = "hail: disconnected · /hail connect";
 
+/**
+ * Trailing-flush window for streamed progress (message_update /
+ * tool_execution_update): the newest snapshot per kind is delivered at most once
+ * per this interval. The daemon coalesces progress newest-wins (~1/s) anyway, so
+ * a per-turn burst of thousands of deltas collapses to a bounded trickle.
+ */
+export const PROGRESS_THROTTLE_MS = 250;
+
+/** Opaque timer handle (setTimeout's return, or a test double). */
+export type TimerHandle = unknown;
+
 /** Status-line presence classification. */
 export type PresenceState = "connected" | "driving" | "offline";
 
@@ -87,6 +98,26 @@ export interface SessionDeps {
    * lazily, so a file-line count is one short and unreliable early.
    */
   getEntries: () => unknown[];
+  /**
+   * Injectable clock/timer for the progress throttle. Default to real time.
+   * `setTimer` should behave like an unref'd setTimeout so a pending flush never
+   * keeps pi's process alive.
+   */
+  now?: () => number;
+  setTimer?: (cb: () => void, ms: number) => TimerHandle;
+  clearTimer?: (handle: TimerHandle) => void;
+  /**
+   * Backpressure gate from the transport (Task C): false while the socket's
+   * write buffer is over the high-water mark, so progress frames are held (the
+   * newest kept pending) instead of written. Boundary frames are ALWAYS written.
+   * Defaults to always-sendable.
+   */
+  canSendProgress?: () => boolean;
+  /**
+   * Register a callback the transport invokes when it drains, so the Session can
+   * retry a held progress flush. Called once, lazily, on first backpressure.
+   */
+  onDrain?: (cb: () => void) => void;
 }
 
 export interface RegisterInput {
@@ -169,8 +200,98 @@ export class Session {
   /** false after a version-mismatch refusal → inert. */
   private isActive = true;
 
+  // ── Progress throttle (muster #502) ──────────────────────────────────────
+  /** Newest held progress frame per kind ('message_update' | 'tool:<id>'). */
+  private readonly pendingProgress = new Map<string, unknown>();
+  /** The scheduled trailing flush, or undefined when none is pending. */
+  private flushTimer: TimerHandle | undefined;
+  /** now() of the last flush, so flushes happen at most once per window. */
+  private lastFlushAt = Number.NEGATIVE_INFINITY;
+  /** Whether we've registered the transport's drain retry (once, lazily). */
+  private drainRegistered = false;
+
+  private readonly now: () => number;
+  private readonly setTimer: (cb: () => void, ms: number) => TimerHandle;
+  private readonly clearTimer: (handle: TimerHandle) => void;
+
   constructor(deps: SessionDeps) {
     this.deps = deps;
+    this.now = deps.now ?? (() => Date.now());
+    this.setTimer =
+      deps.setTimer ??
+      ((cb, ms) => {
+        const t = setTimeout(cb, ms);
+        // A pending flush must never keep pi's process alive.
+        if (typeof t === "object" && t && "unref" in t) (t as { unref: () => void }).unref();
+        return t;
+      });
+    this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+  }
+
+  /**
+   * Hold a streamed progress frame newest-wins under `key`, and ensure a
+   * trailing flush is scheduled. The frame object is kept as-is and only
+   * serialized when (and if) it is actually flushed — a superseded snapshot is
+   * never stringified (this is what breaks the quadratic bytes/turn cost).
+   */
+  private holdProgress(key: string, frame: unknown): void {
+    this.pendingProgress.set(key, frame);
+    this.scheduleFlush();
+  }
+
+  /** Schedule the trailing flush timer if none is pending (at most 1/window). */
+  private scheduleFlush(): void {
+    if (this.flushTimer !== undefined) return;
+    const elapsed = this.now() - this.lastFlushAt;
+    const delay = Math.max(0, PROGRESS_THROTTLE_MS - elapsed);
+    this.flushTimer = this.setTimer(() => {
+      this.flushTimer = undefined;
+      this.flushProgress(false);
+    }, delay);
+  }
+
+  /**
+   * Write every held progress frame (one per kind, newest) and clear the buffer.
+   * When `force` is false and the transport is over its high-water mark, keep
+   * the pending frames and arm a drain retry instead (Task C). `force` (a
+   * boundary flush) always writes, to preserve wire order.
+   */
+  private flushProgress(force: boolean): void {
+    if (this.pendingProgress.size === 0) return;
+    if (!force && this.deps.canSendProgress && !this.deps.canSendProgress()) {
+      this.armDrainRetry();
+      return;
+    }
+    this.lastFlushAt = this.now();
+    const frames = [...this.pendingProgress.values()];
+    this.pendingProgress.clear();
+    for (const frame of frames) this.deps.send(frame);
+  }
+
+  /** Register the transport's drain callback once so a held flush is retried. */
+  private armDrainRetry(): void {
+    if (this.drainRegistered || !this.deps.onDrain) return;
+    this.drainRegistered = true;
+    this.deps.onDrain(() => {
+      // The transport drained: retry the held flush (still gated, in case the
+      // buffer is over the mark again by the time this runs).
+      this.flushProgress(false);
+    });
+  }
+
+  /**
+   * Every non-progress (boundary) frame: flush pending progress FIRST so the
+   * newest snapshot precedes the boundary on the wire (boundaries must never be
+   * dropped or reordered), then write the boundary itself. Boundary flushes are
+   * forced — written even under backpressure — so order is always preserved.
+   */
+  private sendBoundary(frame: unknown): void {
+    if (this.flushTimer !== undefined) {
+      this.clearTimer(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+    this.flushProgress(true);
+    this.deps.send(frame);
   }
 
   /** Stamps extensionVersion; passes identity through verbatim. Optional
@@ -230,19 +351,24 @@ export class Session {
     if (!this.isActive) return;
     const e = piEvent as { type?: string; message?: { role?: string } } | null;
     if (e?.type === "message_update" || e?.type === "tool_execution_update") {
-      // A progress delta: strip pi's duplicate cumulative snapshot before
-      // forwarding (muster #502) so we never stringify the same bytes twice.
-      this.deps.send({ event: stripProgressPartial(piEvent) });
+      // A progress delta: strip pi's duplicate cumulative snapshot (muster #502)
+      // and hold it newest-wins, keyed per kind (per toolCallId for tool
+      // updates) so a burst collapses to one flushed frame per window.
+      const key =
+        e.type === "tool_execution_update"
+          ? `tool:${(piEvent as { toolCallId?: string }).toolCallId ?? ""}`
+          : "message_update";
+      this.holdProgress(key, { event: stripProgressPartial(piEvent) });
       return;
     }
     if (e?.type === "message_end") {
       const role = e.message?.role;
       if (role !== undefined && PERSISTED_ROLES.has(role)) {
-        this.deps.send({ event: piEvent, cursor: this.deps.getEntries().length + 1 });
+        this.sendBoundary({ event: piEvent, cursor: this.deps.getEntries().length + 1 });
         return;
       }
     }
-    this.deps.send({ event: piEvent });
+    this.sendBoundary({ event: piEvent });
   }
 
   /**
@@ -254,19 +380,19 @@ export class Session {
     if (this.pendingPhonePrompt) {
       this.phase = "phone_turn";
       this.pendingPhonePrompt = false;
-      this.deps.send({ lock: "held" });
+      this.sendBoundary({ lock: "held" });
     } else {
       this.phase = "local_turn";
     }
-    this.deps.send({ turn: "start" });
+    this.sendBoundary({ turn: "start" });
   }
 
   turnEnd(): void {
     if (!this.isActive) return;
     const wasPhoneTurn = this.phase === "phone_turn";
-    this.deps.send({ turn: "end" });
+    this.sendBoundary({ turn: "end" });
     if (wasPhoneTurn) {
-      this.deps.send({ lock: "released" });
+      this.sendBoundary({ lock: "released" });
       this.deps.ui.holdInput(false);
       // Re-submit any local input captured during the phone turn, in order.
       const held = this.heldInput;
@@ -294,7 +420,7 @@ export class Session {
   /** A clean pi exit tells the phone the session is gone. */
   exit(code: number): void {
     if (!this.isActive) return;
-    this.deps.send({ exit: { code } });
+    this.sendBoundary({ exit: { code } });
     this.clearPendingAsks();
   }
 
@@ -321,7 +447,7 @@ export class Session {
       const prompt = m.prompt as { text: string; from: string; requestId: string };
       if (this.phase === "local_turn") {
         // The person owns the turn; refuse rather than drop or queue (spec §4).
-        this.deps.send({ refused: { requestId: prompt.requestId, reason: "turn_running" } });
+        this.sendBoundary({ refused: { requestId: prompt.requestId, reason: "turn_running" } });
         return;
       }
       // Attribute the next turn_start to the phone, then inject the prompt as input.
@@ -421,7 +547,7 @@ export class Session {
     if (details.toolName) ask.toolName = details.toolName;
     if (details.surface) ask.surface = details.surface;
     if (details.value != null) ask.value = details.value;
-    this.deps.send({ ask });
+    this.sendBoundary({ ask });
 
     const gen = this.asksGeneration;
     const ac = new AbortController();
@@ -458,7 +584,7 @@ export class Session {
       // A deferred ask is now the permission system's to close (Task P3);
       // anything else is terminal here.
       if (outcome === "deferred") this.deferredAsks.add(requestId);
-      this.deps.send({ askDone: { requestId, outcome, by } });
+      this.sendBoundary({ askDone: { requestId, outcome, by } });
       return decision;
     };
 
@@ -482,7 +608,7 @@ export class Session {
     if (!this.isActive) return;
     if (!this.deferredAsks.has(requestId)) return;
     this.deferredAsks.delete(requestId);
-    this.deps.send({
+    this.sendBoundary({
       askDone: { requestId, outcome: result === "allow" ? "allowed" : "denied", by: "mac" },
     });
   }
@@ -490,7 +616,7 @@ export class Session {
   /** Ask the daemon to connect/disconnect this session. False when inert. */
   requestConnection(connect: boolean): boolean {
     if (!this.isActive) return false;
-    this.deps.send({ connection: connect ? "connect" : "disconnect" });
+    this.sendBoundary({ connection: connect ? "connect" : "disconnect" });
     return true;
   }
 
@@ -502,9 +628,9 @@ export class Session {
   onResend(since: number): void {
     if (!this.isActive) return;
     for (const { event, cursor } of entriesAfter(this.deps.getEntries(), since)) {
-      this.deps.send({ event, replay: true, cursor });
+      this.sendBoundary({ event, replay: true, cursor });
     }
-    this.deps.send({ resend: "done" });
+    this.sendBoundary({ resend: "done" });
   }
 
   /**

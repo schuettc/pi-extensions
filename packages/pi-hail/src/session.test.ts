@@ -789,3 +789,119 @@ test("stripProgressPartial passes non-progress events through unchanged", () => 
   const noPartial = { type: "message_update", message: {}, assistantMessageEvent: { type: "text_delta" } };
   assert.equal(stripProgressPartial(noPartial), noPartial);
 });
+
+// ── Commit B: throttle progress events newest-wins (muster #502) ──
+
+/** A controllable clock + trailing-flush timer for the progress throttle, plus
+ *  a recording send. No real time passes; `advance(ms)` fires due timers. */
+function throttleDeps(opts: { canSendProgress?: () => boolean; onDrain?: (cb: () => void) => void } = {}) {
+  const sent: unknown[] = [];
+  let nowMs = 0;
+  interface T {
+    fireAt: number;
+    cb: () => void;
+    cancelled: boolean;
+  }
+  const timers: T[] = [];
+  const deps = {
+    send: (o: unknown) => sent.push(o),
+    sendUserMessage: () => {},
+    ui: {
+      setStatus: () => {},
+      notify: () => {},
+      holdInput: () => {},
+      openDialog: () => new Promise<string | undefined>(() => {}),
+    },
+    getEntries: () => [] as unknown[],
+    now: () => nowMs,
+    setTimer: (cb: () => void, ms: number): T => {
+      const t: T = { fireAt: nowMs + ms, cb, cancelled: false };
+      timers.push(t);
+      return t;
+    },
+    clearTimer: (t: T) => {
+      t.cancelled = true;
+    },
+    ...(opts.canSendProgress ? { canSendProgress: opts.canSendProgress } : {}),
+    ...(opts.onDrain ? { onDrain: opts.onDrain } : {}),
+  } as unknown as SessionDeps;
+  const advance = (ms: number) => {
+    nowMs += ms;
+    // Fire due timers in scheduled order; a timer may schedule another.
+    for (let i = 0; i < timers.length; i++) {
+      const t = timers[i];
+      if (!t.cancelled && t.fireAt <= nowMs) {
+        t.cancelled = true;
+        t.cb();
+      }
+    }
+  };
+  return { deps, sent, advance, setNow: (v: number) => (nowMs = v) };
+}
+
+const mkUpdate = (i: number) => ({
+  type: "message_update",
+  message: { role: "assistant", content: [{ type: "text", text: `m${i}` }] },
+  assistantMessageEvent: { type: "text_delta", delta: `${i}`, partial: { big: "x".repeat(500) } },
+});
+
+// Guards: a burst of message_update deltas is coalesced newest-wins and flushed
+// once when the trailing 250ms timer fires (bytes/turn stops being quadratic).
+test("message_update progress is coalesced newest-wins and flushed on the 250ms timer", () => {
+  const { deps, sent, advance } = throttleDeps();
+  const s = new Session(deps);
+  for (let i = 0; i < 5; i++) s.forwardEvent(mkUpdate(i));
+  assert.equal(sent.length, 0, "held until the flush timer fires");
+  advance(250);
+  assert.equal(sent.length, 1, "exactly one flush carrying the newest");
+  const frame = sent[0] as { event: { message: { content: { text: string }[] }; assistantMessageEvent: Record<string, unknown> } };
+  assert.equal(frame.event.message.content[0].text, "m4", "the newest snapshot wins");
+  assert.equal("partial" in frame.event.assistantMessageEvent, false, "and it is stripped");
+});
+
+// Guards: flushes happen at most every 250ms — a second burst inside the window
+// is still held until the window elapses.
+test("progress flushes at most once per 250ms window", () => {
+  const { deps, sent, advance } = throttleDeps();
+  const s = new Session(deps);
+  s.forwardEvent(mkUpdate(0));
+  advance(250); // first flush
+  assert.equal(sent.length, 1);
+  s.forwardEvent(mkUpdate(1));
+  advance(100); // inside the window → still held
+  assert.equal(sent.length, 1);
+  advance(150); // window elapsed → second flush
+  assert.equal(sent.length, 2);
+});
+
+// Guards: a non-progress (boundary) frame flushes pending progress FIRST so the
+// wire order is preserved (boundary events must never be reordered).
+test("a boundary frame flushes pending progress first, preserving order", () => {
+  const { deps, sent } = throttleDeps();
+  const s = new Session(deps);
+  s.forwardEvent(mkUpdate(0));
+  s.forwardEvent(mkUpdate(1)); // coalesced, still held
+  s.turnEnd(); // boundary
+  assert.equal(sent.length, 2);
+  const first = sent[0] as { event?: { type?: string; message?: { content: { text: string }[] } } };
+  assert.equal(first.event?.type, "message_update");
+  assert.equal(first.event?.message?.content[0].text, "m1", "the newest snapshot precedes the boundary");
+  assert.deepEqual(sent[1], { turn: "end" });
+});
+
+// Guards: tool_execution_update is coalesced per toolCallId, and message_update
+// is tracked as its own kind — distinct keys each flush their own newest frame.
+test("tool_execution_update coalesces per toolCallId; message_update tracked separately", () => {
+  const { deps, sent, advance } = throttleDeps();
+  const s = new Session(deps);
+  s.forwardEvent({ type: "tool_execution_update", toolCallId: "a", toolName: "w", args: {}, partialResult: { n: 1 } });
+  s.forwardEvent({ type: "tool_execution_update", toolCallId: "a", toolName: "w", args: {}, partialResult: { n: 2 } });
+  s.forwardEvent({ type: "tool_execution_update", toolCallId: "b", toolName: "w", args: {}, partialResult: { n: 1 } });
+  s.forwardEvent(mkUpdate(0));
+  advance(250);
+  assert.equal(sent.length, 3, "one flushed frame per distinct progress key");
+  // tool a carries its newest, and partialResult is stripped
+  const toolA = (sent as { event: { toolCallId?: string } }[]).find((f) => f.event.toolCallId === "a");
+  assert.ok(toolA);
+  assert.equal("partialResult" in (toolA!.event as Record<string, unknown>), false);
+});
