@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import ledger from "./index.ts";
+import docket from "./index.ts";
 
-function fakeLedger(): { bin: string; log: string } {
-  const dir = mkdtempSync(join(tmpdir(), "pi-ledger-"));
+function fakeDocket(): { bin: string; log: string } {
+  const dir = mkdtempSync(join(tmpdir(), "pi-docket-"));
   const log = join(dir, "log");
-  const bin = join(dir, "ledger");
+  const bin = join(dir, "docket");
   writeFileSync(bin, `#!/bin/sh
-if [ "$1" = brief ]; then echo "ledger: schuettc/hail: 1 item(s) need attention"; exit 0; fi
+if [ "$1" = brief ]; then echo "docket: schuettc/hail: 1 item(s) need attention"; exit 0; fi
 { echo "ARGS $* SESSION=$AGENT_SESSION_ID"; cat; echo; } >> '${log}'
 `, { mode: 0o755 });
   return { bin, log };
@@ -25,17 +25,17 @@ const ctx = { cwd: "/w/hail", sessionManager: { getSessionId: () => "pi-7" } };
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 test("inert when the binary is missing", () => {
-  process.env.LEDGER_BIN = "/nonexistent/ledger";
+  process.env.DOCKET_BIN = "/nonexistent/docket";
   const { pi, handlers } = fakePi();
-  ledger(pi as any);
+  docket(pi as any);
   assert.deepEqual(Object.keys(handlers), []);
 });
 
 test("records git bash calls with the pi session, skips others", async () => {
-  const f = fakeLedger();
-  process.env.LEDGER_BIN = f.bin;
+  const f = fakeDocket();
+  process.env.DOCKET_BIN = f.bin;
   const { pi, handlers } = fakePi();
-  ledger(pi as any);
+  docket(pi as any);
   await handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
   await handlers.tool_result({ type: "tool_result", toolName: "bash", input: { command: "git push origin main" }, content: [], isError: false });
   await handlers.tool_result({ type: "tool_result", toolName: "bash", input: { command: "ls -la" }, content: [], isError: false });
@@ -48,13 +48,13 @@ test("records git bash calls with the pi session, skips others", async () => {
 });
 
 test("briefs the first turn only, hidden from the transcript", async () => {
-  const f = fakeLedger();
-  process.env.LEDGER_BIN = f.bin;
+  const f = fakeDocket();
+  process.env.DOCKET_BIN = f.bin;
   const { pi, handlers } = fakePi();
-  ledger(pi as any);
+  docket(pi as any);
   await handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
   const first = await handlers.before_agent_start({ type: "before_agent_start", prompt: "hi", systemPrompt: "" });
-  assert.equal(first?.message?.customType, "ledger-brief");
+  assert.equal(first?.message?.customType, "docket-brief");
   assert.equal(first?.message?.display, false);
   assert.match(String(first?.message?.content), /need attention/);
   assert.equal(await handlers.before_agent_start({ type: "before_agent_start", prompt: "again", systemPrompt: "" }), undefined);

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mentionsGit, recordPayload, childEnv } from "./ledger.ts";
+import { mentionsGit, recordPayload, childEnv } from "./docket.ts";
 
 test("mentionsGit spots git and gh invocations only", () => {
   for (const c of ["git push", "cd x && git commit -m 'a'", "gh pr merge 3", "/usr/bin/git fetch", "FOO=1 gh api x", "(git status)"]) {
