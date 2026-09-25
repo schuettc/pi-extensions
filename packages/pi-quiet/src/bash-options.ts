@@ -1,6 +1,7 @@
 import type { BashSpawnContext, BashToolOptions } from "@earendil-works/pi-coding-agent";
 
 export const SESSION_ID_VAR = "AGENT_SESSION_ID";
+export const SESSION_CHILD_VAR = "AGENT_SESSION_CHILD";
 
 // The two pi settings the built-in bash tool is constructed with. pi's own
 // SettingsManager satisfies this; tests pass a literal.
@@ -17,8 +18,17 @@ export type ShellSettings = {
 // When pi did not expose a session (exposeSessionEnvironment: false), an
 // inherited value is removed rather than passed through — a command never
 // carries an identity that is not its session's.
+//
+// AGENT_SESSION_CHILD is always removed. It tells tools-common's harness rule
+// that AGENT_SESSION_ID beats CLAUDE_CODE_SESSION_ID because the process runs
+// as part of that session (pi-claude-bridge sets it on its Claude children).
+// pi never sets it, so any value here was inherited from whatever started pi;
+// passed through, it would make a Claude session launched from a command
+// resolve to pi's id instead of its own. pi's own commands resolve through
+// AGENT_SESSION_ID alone, marker or not.
 export function identitySpawnHook(context: BashSpawnContext): BashSpawnContext {
   const env: NodeJS.ProcessEnv = { ...context.env };
+  delete env[SESSION_CHILD_VAR];
   const id = env.PI_SESSION_ID;
   if (id === undefined || id === "") delete env[SESSION_ID_VAR];
   else env[SESSION_ID_VAR] = id;

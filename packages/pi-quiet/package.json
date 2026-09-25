@@ -1,6 +1,6 @@
 {
   "name": "pi-quiet",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "This rig's bash tool for the pi coding agent: calm one-line rendering (ctrl+o expands), pi's shell settings honoured, AGENT_SESSION_ID stamped per command from PI_SESSION_ID. Execution is still pi's built-in.",
   "type": "module",
   "license": "MIT",

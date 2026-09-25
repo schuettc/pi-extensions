@@ -16,6 +16,13 @@ test("an inherited AGENT_SESSION_ID is replaced by this session's, not passed th
   assert.equal(out.env.AGENT_SESSION_ID, "inner");
 });
 
+test("an inherited AGENT_SESSION_CHILD is removed, with or without PI_SESSION_ID", () => {
+  for (const env of [{ PI_SESSION_ID: "inner", AGENT_SESSION_CHILD: "1" }, { AGENT_SESSION_CHILD: "1" }]) {
+    const out = identitySpawnHook({ command: "true", cwd: "/", env });
+    assert.equal("AGENT_SESSION_CHILD" in out.env, false);
+  }
+});
+
 test("without PI_SESSION_ID the hook removes AGENT_SESSION_ID rather than let an inherited value through", () => {
   const out = identitySpawnHook({ command: "true", cwd: "/", env: { AGENT_SESSION_ID: "polluted" } });
   assert.equal(out.env.AGENT_SESSION_ID, undefined);
