@@ -36,26 +36,45 @@ interface OpenDialogFake {
   calls: [string, string[], AbortSignal][];
   /** Resolve the most recent (still-pending) openDialog call. */
   resolve(value: string | undefined): void;
+  /** Reject the most recent (still-pending) openDialog call. */
+  reject(err?: unknown): void;
   /** The AbortSignal handed to the most recent call. */
   lastSignal(): AbortSignal | undefined;
 }
 
-function openDialogFake(): OpenDialogFake {
+/**
+ * Options to model the ways a real ctx.ui.select can misbehave:
+ *  - throwSync: the call itself throws synchronously (before returning a promise);
+ *  - rejectOnAbort: the returned promise REJECTS when the signal aborts (pi's
+ *    real interactive select RESOLVES undefined instead, but a link must be
+ *    robust to either).
+ */
+export function makeOpenDialogFake(opts: { throwSync?: boolean; rejectOnAbort?: boolean } = {}): OpenDialogFake {
   const calls: [string, string[], AbortSignal][] = [];
-  const resolvers: ((v: string | undefined) => void)[] = [];
+  const settlers: { resolve: (v: string | undefined) => void; reject: (e: unknown) => void }[] = [];
   const fn = ((title: string, options: string[], signal: AbortSignal) => {
     calls.push([title, options, signal]);
-    return new Promise<string | undefined>((resolve) => {
-      resolvers.push(resolve);
+    if (opts.throwSync) throw new Error("openDialog boom (sync)");
+    return new Promise<string | undefined>((resolve, reject) => {
+      settlers.push({ resolve, reject });
+      if (opts.rejectOnAbort) {
+        signal.addEventListener("abort", () => reject(new Error("dialog aborted")), { once: true });
+      }
     });
   }) as OpenDialogFake;
   fn.calls = calls;
   fn.resolve = (value) => {
-    const r = resolvers.shift();
-    if (r) r(value);
+    settlers.shift()?.resolve(value);
+  };
+  fn.reject = (err) => {
+    settlers.shift()?.reject(err ?? new Error("openDialog rejected"));
   };
   fn.lastSignal = () => calls[calls.length - 1]?.[2];
   return fn;
+}
+
+function openDialogFake(): OpenDialogFake {
+  return makeOpenDialogFake();
 }
 
 /** Reusable fake dependency set. Later tasks extend this. */

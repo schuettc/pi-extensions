@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Session } from "./session.ts";
 import { EXTENSION_VERSION } from "./version.ts";
-import { fakeDeps, lastSend } from "./test-helpers.ts";
+import { fakeDeps, lastSend, makeOpenDialogFake } from "./test-helpers.ts";
 
 // Guards: the phone never sees a session it can't identify — register must carry id, project, work, dir, and both versions.
 test("buildRegisterArgs stamps extensionVersion and passes identity through", () => {
@@ -405,6 +405,130 @@ test("onDecision ignores an already-answered ask and fires once", async () => {
   const afterFirst = deps.send.calls.length;
   s.onDecision("b", "deny"); // second decision for the same ask is a no-op
   assert.equal(deps.send.calls.length, afterFirst, "a deferred ask closes only once");
+});
+
+// \u2500\u2500 Fix: every ask settles with exactly one askDone, even on a Mac-dialog fault \u2500\u2500
+
+// Guards: openDialog rejecting asynchronously must not strand the ask \u2014 the Mac
+// side maps to defer, exactly one askDone{deferred,mac} is sent, and the pending
+// decision entry is cleaned up (a later phone answer is a no-op).
+test("openDialog rejection settles defer + one askDone{deferred,mac}, no leaked pending", async () => {
+  const deps = fakeDeps();
+  deps.ui.openDialog = makeOpenDialogFake();
+  const s = phoneConnected(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  deps.ui.openDialog.reject(new Error("boom"));
+  assert.equal(await p, "defer");
+  const dones = deps.send.calls.map((c) => c[0] as Record<string, unknown>).filter((f) => f.askDone);
+  assert.equal(dones.length, 1, "exactly one askDone");
+  assert.deepEqual(dones[0].askDone, { requestId: "r1", outcome: "deferred", by: "mac" });
+  // No leaked pending decision: a late phone answer produces no further frame.
+  const before = deps.send.calls.length;
+  s.onInbound({ answer: { requestId: "r1", value: "allow" } });
+  assert.equal(deps.send.calls.length, before, "a late phone answer is a no-op");
+});
+
+// Guards: openDialog throwing SYNCHRONOUSLY must not throw out of
+// requestPhoneDecision (the ask frame was already sent) \u2014 it settles defer with
+// exactly one askDone{deferred,mac} and no leaked pending entry.
+test("openDialog synchronous throw settles defer + one askDone{deferred,mac}, no leak", async () => {
+  const deps = fakeDeps();
+  deps.ui.openDialog = makeOpenDialogFake({ throwSync: true });
+  const s = phoneConnected(deps);
+  let p: Promise<unknown>;
+  assert.doesNotThrow(() => {
+    p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  });
+  assert.equal(await p!, "defer");
+  const dones = deps.send.calls.map((c) => c[0] as Record<string, unknown>).filter((f) => f.askDone);
+  assert.equal(dones.length, 1, "exactly one askDone");
+  assert.deepEqual(dones[0].askDone, { requestId: "r1", outcome: "deferred", by: "mac" });
+  const before = deps.send.calls.length;
+  s.onInbound({ answer: { requestId: "r1", value: "allow" } });
+  assert.equal(deps.send.calls.length, before, "a late phone answer is a no-op");
+});
+
+// Guards: when the phone wins and the Mac dialog REJECTS on abort, the verdict
+// is still the phone's, exactly one askDone is sent, and the late Mac rejection
+// never surfaces as an unhandled rejection.
+test("phone win with a Mac dialog that rejects on abort: one askDone, no unhandled rejection", async () => {
+  const deps = fakeDeps();
+  deps.ui.openDialog = makeOpenDialogFake({ rejectOnAbort: true });
+  let leaked: unknown = null;
+  const guard = (reason: unknown) => {
+    leaked = reason;
+  };
+  process.on("unhandledRejection", guard);
+  try {
+    const s = phoneConnected(deps);
+    const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+    s.onInbound({ answer: { requestId: "r1", value: "allow" } });
+    assert.equal(await p, "allow");
+    // Let any late microtasks (the aborted Mac rejection) flush.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const dones = deps.send.calls.map((c) => c[0] as Record<string, unknown>).filter((f) => f.askDone);
+    assert.equal(dones.length, 1, "exactly one askDone");
+    assert.deepEqual(dones[0].askDone, { requestId: "r1", outcome: "allowed", by: "phone" });
+    assert.equal(leaked, null, "the aborted Mac dialog must not leak an unhandled rejection");
+  } finally {
+    process.removeListener("unhandledRejection", guard);
+  }
+});
+
+// Guards: a duplicate requestId (should not happen \u2014 pi serializes asks) defers
+// immediately, BEFORE a second ask frame or Mac dialog is opened.
+test("a duplicate requestId defers immediately (no second ask frame, no second dialog)", async () => {
+  const deps = fakeDeps();
+  const s = phoneConnected(deps);
+  const p1 = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  const v2 = await s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  assert.equal(v2, "defer");
+  const asks = deps.send.calls.map((c) => c[0] as Record<string, unknown>).filter((f) => f.ask);
+  assert.equal(asks.length, 1, "only one ask frame for the duplicate requestId");
+  assert.equal(deps.ui.openDialog.calls.length, 1, "only one Mac dialog for the duplicate requestId");
+  deps.ui.openDialog.resolve(undefined); // settle the first
+  await p1;
+});
+
+// Guards: a re-register (reconnect) abandons an in-flight ask \u2014 it resolves defer
+// with NO askDone (the daemon re-affirms fresh), and does not linger.
+test("re-register resolves an in-flight ask to defer with no askDone", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.4.0", accepted: true, have: 0 } });
+  s.onInbound({ connection: "connected" });
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  // Reconnect: the socket re-registered.
+  s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.4.0", accepted: true, have: 0 } });
+  assert.equal(await p, "defer");
+  const dones = deps.send.calls.map((c) => c[0] as Record<string, unknown>).filter((f) => f.askDone);
+  assert.equal(dones.length, 0, "an abandoned ask emits no askDone");
+});
+
+// Guards: a re-register clears deferredAsks so a later permissions:decision for a
+// pre-reconnect ask is ignored (the entry did not linger).
+test("re-register clears deferredAsks so a stale decision is ignored", async () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.4.0", accepted: true, have: 0 } });
+  s.onInbound({ connection: "connected" });
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  deps.ui.openDialog.resolve("More options\u2026"); // deferred \u2192 deferredAsks has r1
+  assert.equal(await p, "defer");
+  s.onRegisterReply({ ok: true, data: { hostId: "h", daemonVersion: "0.4.0", accepted: true, have: 0 } });
+  const before = deps.send.calls.length;
+  s.onDecision("r1", "allow");
+  assert.equal(deps.send.calls.length, before, "a decision for a cleared deferred ask is ignored");
+});
+
+// Guards: session shutdown (exit) resolves an in-flight ask to defer.
+test("exit resolves an in-flight ask to defer", async () => {
+  const deps = fakeDeps();
+  const s = phoneConnected(deps);
+  const p = s.requestPhoneDecision({ requestId: "r1", toolName: "bash", command: "rm x" } as never);
+  s.exit(0);
+  assert.equal(await p, "defer");
 });
 
 // Guards: a presence frame updates the status line.

@@ -113,6 +113,14 @@ export class Session {
    */
   private deferredAsks = new Set<string>();
 
+  /**
+   * Bumped whenever in-flight asks are abandoned (session shutdown / reconnect).
+   * Each ask captures the generation at open time; a late settlement whose
+   * generation no longer matches is dropped silently (no askDone, no deferred
+   * entry) so a torn-down / re-registered session leaves nothing lingering.
+   */
+  private asksGeneration = 0;
+
   /** Daemon's last-seen device sequence number, from the register reply. */
   private have: number | undefined = undefined;
   /**
@@ -153,6 +161,9 @@ export class Session {
   /** Handles the register reply: stores replay cursor; refuses on mismatch. */
   onRegisterReply(reply: RegisterReply): void {
     if (reply.ok) {
+      // A reconnect re-registers: abandon any ask that was in flight across the
+      // gap (the daemon re-affirms connection fresh) so nothing lingers.
+      if (this.hasRegistered) this.clearPendingAsks();
       // Stored for diagnostics only: the daemon now drives catch-up via a
       // {"resend":{since}} frame (streaming spec §4.3), so registration no
       // longer replays here.
@@ -241,6 +252,21 @@ export class Session {
   exit(code: number): void {
     if (!this.isActive) return;
     this.deps.send({ exit: { code } });
+    this.clearPendingAsks();
+  }
+
+  /**
+   * Abandon every in-flight / deferred ask: resolve each awaiting decision to
+   * "defer" (so the authorizer unblocks and pi's own prompt runs) and drop both
+   * bookkeeping sets. Bumping the generation first means the resolved decisions'
+   * late settlements emit no askDone and re-add no deferred entry.
+   */
+  private clearPendingAsks(): void {
+    this.asksGeneration++;
+    const resolvers = [...this.pendingDecisions.values()];
+    this.pendingDecisions.clear();
+    this.deferredAsks.clear();
+    for (const resolve of resolvers) resolve("defer");
   }
 
   /** Daemon → extension frame dispatch. Cases land in Tasks 5, 6, 8. */
@@ -320,14 +346,23 @@ export class Session {
    *   - Mac:   a select dialog (Allow / Deny / More options…) we can dismiss
    *            programmatically the moment the phone answers.
    * There is NO timeout — a human on either device is awaited. Whichever way it
-   * settles, an { askDone } frame tells the daemon who answered and how. Never
-   * throws (a dangling decision at session end only ever resolves).
+   * settles, exactly ONE { askDone } frame tells the daemon who answered and how.
+   * Never throws, and never leaves a phantom card: a Mac dialog that rejects or
+   * throws (sync or on abort) maps to a Mac "defer", and cleanup on
+   * shutdown/reconnect resolves any dangling decision to "defer".
    */
   requestPhoneDecision(details: PromptPermissionDetails): Promise<PhoneDecision> {
     if (!this.isActive || !this.connected) {
       return Promise.resolve("defer");
     }
     const requestId = details.requestId;
+    // Duplicate-requestId guard BEFORE any side effect: pi serializes asks, so a
+    // live duplicate should never happen; if it does, defer immediately without
+    // sending a second ask frame or opening a second Mac dialog.
+    if (this.pendingDecisions.has(requestId)) {
+      return Promise.resolve("defer");
+    }
+
     const label = details.toolName ?? details.surface ?? "this";
     const title = `Allow ${label}?`;
     const message = firstPreview(details);
@@ -345,40 +380,51 @@ export class Session {
     if (details.value != null) ask.value = details.value;
     this.deps.send({ ask });
 
+    const gen = this.asksGeneration;
+    const ac = new AbortController();
+
     const phoneP = new Promise<PhoneDecision>((resolve) => {
-      // pi serializes asks, so a live duplicate should never happen; if it does,
-      // resolve defer rather than clobbering the in-flight resolver.
-      if (this.pendingDecisions.has(requestId)) {
-        resolve("defer");
-        return;
-      }
       this.pendingDecisions.set(requestId, resolve);
     });
 
-    const ac = new AbortController();
-    const macP = this.deps.ui
-      .openDialog(`${title}\n${message}`, ["Allow", "Deny", "More options…"], ac.signal)
-      .then((choice) => macChoiceToDecision(choice));
+    // The Mac side: a synchronous throw becomes a rejection inside this async
+    // wrapper, and ANY rejection (throw, or a UI that rejects on abort) maps to
+    // a Mac "defer" — the ask was already announced, so it must still settle.
+    const macP: Promise<PhoneDecision> = (async () =>
+      macChoiceToDecision(
+        await this.deps.ui.openDialog(
+          `${title}\n${message}`,
+          ["Allow", "Deny", "More options…"],
+          ac.signal,
+        ),
+      ))().catch(() => "defer" as PhoneDecision);
+
+    let settled = false;
+    const finish = (by: "phone" | "mac", decision: PhoneDecision): PhoneDecision => {
+      if (settled) return decision;
+      settled = true;
+      // First answer wins: drop the pending resolver and dismiss the Mac dialog
+      // (a no-op if it already closed).
+      this.pendingDecisions.delete(requestId);
+      ac.abort();
+      // Abandoned across a shutdown/reconnect: settle the awaiting authorizer to
+      // defer but emit nothing and record nothing.
+      if (gen !== this.asksGeneration) return decision;
+      const outcome =
+        decision === "allow" ? "allowed" : decision === "deny" ? "denied" : "deferred";
+      // A deferred ask is now the permission system's to close (Task P3);
+      // anything else is terminal here.
+      if (outcome === "deferred") this.deferredAsks.add(requestId);
+      this.deps.send({ askDone: { requestId, outcome, by } });
+      return decision;
+    };
 
     return (async () => {
       const winner = await Promise.race([
         phoneP.then((decision) => ({ by: "phone" as const, decision })),
         macP.then((decision) => ({ by: "mac" as const, decision })),
       ]);
-      // First answer wins: stop the other surface from also settling.
-      this.pendingDecisions.delete(requestId);
-      if (winner.by === "phone") ac.abort();
-      const outcome =
-        winner.decision === "allow"
-          ? "allowed"
-          : winner.decision === "deny"
-            ? "denied"
-            : "deferred";
-      // A deferred ask is now the permission system's to close (Task P3);
-      // anything else is terminal here.
-      if (outcome === "deferred") this.deferredAsks.add(requestId);
-      this.deps.send({ askDone: { requestId, outcome, by: winner.by } });
-      return winner.decision;
+      return finish(winner.by, winner.decision);
     })();
   }
 
