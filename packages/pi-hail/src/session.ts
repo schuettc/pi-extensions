@@ -31,6 +31,16 @@ export interface SessionDeps {
     setStatus: (text: string | undefined) => void;
     notify: (msg: string, level?: "info" | "warning" | "error") => void;
     holdInput: (held: boolean) => void;
+    /**
+     * Open a Mac-pane dialog (ctx.ui.select) and return the chosen option, or
+     * undefined when dismissed. The AbortSignal lets the Session dismiss it
+     * programmatically the moment the phone answers first (spec §A).
+     */
+    openDialog: (
+      title: string,
+      options: string[],
+      signal: AbortSignal,
+    ) => Promise<string | undefined>;
   };
   /**
    * pi's IN-MEMORY entry list (ctx.sessionManager.getEntries(), which excludes

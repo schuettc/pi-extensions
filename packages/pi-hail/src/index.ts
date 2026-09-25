@@ -182,6 +182,11 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         ui: {
           setStatus: (key: string, text: string | undefined) => void;
           notify: (msg: string, level: "info" | "warning" | "error") => void;
+          select: (
+            title: string,
+            options: string[],
+            opts?: { signal?: AbortSignal },
+          ) => Promise<string | undefined>;
         };
       };
 
@@ -220,6 +225,9 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
           holdInput: (held) => {
             heldFlag = held;
           },
+          // The Mac side of an ask: a select dialog we can dismiss the moment
+          // the phone answers first (spec \u00a7A). Never throws into the Session.
+          openDialog: (title, options, signal) => c.ui.select(title, options, { signal }),
         },
         getEntries,
       };

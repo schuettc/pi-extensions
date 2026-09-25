@@ -141,6 +141,20 @@ test("version_mismatch reply renders one notice and makes the session inert", ()
   assert.equal(deps.send.calls.length, 0);
 });
 
+// Guards (P1): the Mac-dialog capability is wired into SessionDeps.ui so the
+// pure Session can open ctx.ui.select and dismiss it with an AbortSignal.
+test("SessionDeps.ui exposes an openDialog capability the Session can drive", async () => {
+  const deps = fakeDeps();
+  const ac = new AbortController();
+  const p = deps.ui.openDialog("Allow bash?", ["Allow", "Deny", "More options…"], ac.signal);
+  assert.equal(deps.ui.openDialog.calls.length, 1);
+  assert.equal(deps.ui.openDialog.calls[0][0], "Allow bash?");
+  assert.deepEqual(deps.ui.openDialog.calls[0][1], ["Allow", "Deny", "More options…"]);
+  assert.equal(deps.ui.openDialog.calls[0][2], ac.signal);
+  deps.ui.openDialog.resolve("Allow");
+  assert.equal(await p, "Allow");
+});
+
 // Guards: a presence frame updates the status line.
 test("onInbound presence sets the status text", () => {
   const deps = fakeDeps();
@@ -166,7 +180,12 @@ function recDeps() {
   r.deps = {
     send: (o) => sent.push(o),
     sendUserMessage: () => {},
-    ui: { setStatus: (t) => statuses.push(t), notify: (m) => notes.push(m), holdInput: () => {} },
+    ui: {
+      setStatus: (t) => statuses.push(t),
+      notify: (m) => notes.push(m),
+      holdInput: () => {},
+      openDialog: () => new Promise<string | undefined>(() => {}),
+    },
     getEntries: () => r.entries,
   };
   return r;
