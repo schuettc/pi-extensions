@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Session } from "./session.ts";
+import { Session, stripProgressPartial } from "./session.ts";
 import { EXTENSION_VERSION } from "./version.ts";
 import { fakeDeps, lastSend, makeOpenDialogFake } from "./test-helpers.ts";
 
@@ -729,4 +729,63 @@ test("buildRegisterArgs threads the register cursor (getEntries().length)", () =
     cursor: r.deps.getEntries().length,
   });
   assert.equal(args.cursor, 3);
+});
+
+// ── Commit A: strip duplicate partial snapshots from progress events (muster #502) ──
+
+// Guards: pi's message_update carries the FULL partial message twice (`message`
+// and `assistantMessageEvent.partial`); forwarding both makes bytes/turn grow
+// quadratically. Strip the duplicate `partial`, KEEP `message` (the phone
+// renders from it), and never mutate pi's own event object.
+test("stripProgressPartial removes assistantMessageEvent.partial without mutating the original", () => {
+  const partial = { role: "assistant", content: [{ type: "text", text: "x".repeat(1000) }] };
+  const message = { role: "assistant", content: [{ type: "text", text: "x".repeat(1000) }] };
+  const event = {
+    type: "message_update",
+    message,
+    assistantMessageEvent: { type: "text_delta", delta: "x", partial },
+  };
+  const stripped = stripProgressPartial(event) as {
+    type: string;
+    message: unknown;
+    assistantMessageEvent: Record<string, unknown>;
+  };
+  // partial gone from the copy…
+  assert.equal("partial" in stripped.assistantMessageEvent, false);
+  // …message kept (same reference is fine — it's the snapshot the phone renders)…
+  assert.equal(stripped.message, message);
+  assert.equal(stripped.assistantMessageEvent.type, "text_delta");
+  assert.equal(stripped.assistantMessageEvent.delta, "x");
+  // …and pi's original event is untouched (no mutation).
+  assert.equal("partial" in event.assistantMessageEvent, true);
+  assert.notEqual(stripped, event);
+  assert.notEqual(stripped.assistantMessageEvent, event.assistantMessageEvent);
+});
+
+// Guards: tool_execution_update carries a cumulative `partialResult` duplicate;
+// strip it, keep toolCallId/toolName/args, and never mutate the original.
+test("stripProgressPartial removes tool_execution_update.partialResult without mutating the original", () => {
+  const event = {
+    type: "tool_execution_update",
+    toolCallId: "t1",
+    toolName: "write",
+    args: { path: "/p" },
+    partialResult: { output: "y".repeat(1000) },
+  };
+  const stripped = stripProgressPartial(event) as Record<string, unknown>;
+  assert.equal("partialResult" in stripped, false);
+  assert.equal(stripped.toolCallId, "t1");
+  assert.equal(stripped.toolName, "write");
+  assert.deepEqual(stripped.args, { path: "/p" });
+  assert.equal("partialResult" in event, true);
+  assert.notEqual(stripped, event);
+});
+
+// Guards: non-progress events and events without the duplicate field pass
+// through unchanged (same reference — no needless copy).
+test("stripProgressPartial passes non-progress events through unchanged", () => {
+  const start = { type: "message_start", message: { role: "assistant" } };
+  assert.equal(stripProgressPartial(start), start);
+  const noPartial = { type: "message_update", message: {}, assistantMessageEvent: { type: "text_delta" } };
+  assert.equal(stripProgressPartial(noPartial), noPartial);
 });

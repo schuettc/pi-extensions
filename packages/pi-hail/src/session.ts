@@ -13,6 +13,43 @@ import { EXTENSION_VERSION } from "./version.ts";
 /** A phone-originated permission verdict. `defer` yields to pi's own prompt. */
 export type PhoneDecision = "allow" | "deny" | "defer";
 
+/**
+ * Strip the duplicate cumulative snapshot pi carries on a streaming progress
+ * event, so forwarding never ships the same bytes twice per delta (muster #502).
+ * pi's MessageUpdateEvent carries the full partial message TWICE: once as
+ * `message` (the snapshot the phone renders — KEEP it) and once as
+ * `assistantMessageEvent.partial` (a cumulative duplicate). encodeLine →
+ * JSON.stringify per delta then makes bytes/turn grow as deltas × size
+ * (quadratic). This mirrors pi's own `WithoutPartial` (dist/modes/json-event):
+ * drop `assistantMessageEvent.partial` from message_update and the equivalent
+ * `partialResult` cumulative duplicate from tool_execution_update.
+ *
+ * Returns a SHALLOW copy (never mutates pi's own event object); `message` and
+ * the other kept fields are shared by reference — cheap, and the phone renders
+ * from that same snapshot. Non-progress events, and progress events that carry
+ * no duplicate, pass through unchanged (same reference — no needless copy).
+ */
+export function stripProgressPartial(event: unknown): unknown {
+  if (event == null || typeof event !== "object") return event;
+  const e = event as { type?: string };
+  if (e.type === "message_update") {
+    const ame = (e as { assistantMessageEvent?: unknown }).assistantMessageEvent;
+    if (ame != null && typeof ame === "object" && "partial" in ame) {
+      const { partial: _partial, ...restAme } = ame as Record<string, unknown>;
+      return { ...(e as Record<string, unknown>), assistantMessageEvent: restAme };
+    }
+    return event;
+  }
+  if (e.type === "tool_execution_update") {
+    if ("partialResult" in (e as Record<string, unknown>)) {
+      const { partialResult: _partialResult, ...rest } = e as Record<string, unknown>;
+      return rest;
+    }
+    return event;
+  }
+  return event;
+}
+
 /** Which side owns the current turn. `idle` at rest. */
 export type Phase = "idle" | "local_turn" | "phone_turn";
 
@@ -192,6 +229,12 @@ export class Session {
   forwardEvent(piEvent: unknown): void {
     if (!this.isActive) return;
     const e = piEvent as { type?: string; message?: { role?: string } } | null;
+    if (e?.type === "message_update" || e?.type === "tool_execution_update") {
+      // A progress delta: strip pi's duplicate cumulative snapshot before
+      // forwarding (muster #502) so we never stringify the same bytes twice.
+      this.deps.send({ event: stripProgressPartial(piEvent) });
+      return;
+    }
     if (e?.type === "message_end") {
       const role = e.message?.role;
       if (role !== undefined && PERSISTED_ROLES.has(role)) {
