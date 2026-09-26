@@ -6,7 +6,7 @@
 
 import type { PromptPermissionDetails } from "@gotgenes/pi-permission-system";
 import type { Phone, RegisterArgs, RegisterReply } from "./protocol.ts";
-import { entriesAfter, PERSISTED_ROLES } from "./replay.ts";
+import { entriesAfter, PERSISTED_ROLES, trimFrames } from "./replay.ts";
 import { presenceToStatus } from "./status.ts";
 import { EXTENSION_VERSION } from "./version.ts";
 
@@ -480,8 +480,8 @@ export class Session {
       return;
     }
     if ("resend" in m) {
-      const since = (m.resend as { since?: number }).since ?? 0;
-      this.onResend(since);
+      const resend = m.resend as { since?: number; limit?: number };
+      this.onResend(resend.since ?? 0, resend.limit ?? 0);
       return;
     }
     if ("answer" in m) {
@@ -622,10 +622,28 @@ export class Session {
    * Replay completed message entries after `since` at catch-up priority. Each
    * replay frame carries its absolute cursor (since + i + 1) so the daemon
    * records where it left off; the trailing { resend:"done" } flushes its hold.
+   *
+   * When `limit` > 0 and there are more replayable frames than `limit`, only the
+   * LAST `limit` frames are sent (streaming spec \u00a7A). A single
+   * hail_history_trimmed marker is sent FIRST, carrying the count skipped and the
+   * cursor of the last skipped frame, so the daemon's stored cursor advances
+   * past the whole skipped range. `limit` 0 (or absent) is uncapped \u2014 today's
+   * behavior, no marker.
    */
-  onResend(since: number): void {
+  onResend(since: number, limit = 0): void {
     if (!this.isActive) return;
-    for (const { event, cursor } of entriesAfter(this.deps.getEntries(), since)) {
+    const { kept, skipped, lastSkippedCursor } = trimFrames(
+      entriesAfter(this.deps.getEntries(), since),
+      limit,
+    );
+    if (skipped > 0) {
+      this.sendBoundary({
+        event: { type: "hail_history_trimmed", skipped },
+        replay: true,
+        cursor: lastSkippedCursor,
+      });
+    }
+    for (const { event, cursor } of kept) {
       this.sendBoundary({ event, replay: true, cursor });
     }
     this.sendBoundary({ resend: "done" });
