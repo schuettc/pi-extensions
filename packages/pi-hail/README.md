@@ -14,27 +14,55 @@ Add the extension to `~/.pi/agent/settings.json`:
 
 The extension loads on every pi session but is inert unless it owns an interactive TUI pane and the hail daemon is running. A missing or slow daemon never blocks pi.
 
-### Required: answer approvals from your phone (0.4.0)
+### Required: answer approvals from your phone (0.6.0)
 
-To let a paired phone answer a permission ask (allow/deny) as well as your Mac,
-add `"pi-hail"` **after** `"pi-auto-review"` in the permission system's authorizer
-chain, in `~/.pi/agent/extensions/pi-permission-system/config.json`:
+Phone approvals ride the permission system's **own** prompt: the permission
+system draws the single dialog, and pi-hail mirrors that same prompt to your
+phone and answers it through the fork's prompt-answerer seam. pi-hail draws no
+dialog of its own and raises no alerts — the tmux bell and 🔐 fire exactly as
+they do with pi-hail absent, and `pi-auto-review`'s auto-confirm is untouched.
+
+This needs two things.
+
+**1. Install the fork of the permission system** under its original name, via
+npm's alias spec, in `~/.pi/agent/settings.json`. Use the alias pin **instead
+of** plain `@gotgenes/pi-permission-system` — never both (they resolve to the
+same path on disk, so two gates can never load together):
 
 ```json
 {
-  "authorizerChain": ["pi-auto-review", "pi-hail"]
+  "extensions": [
+    "npm:@gotgenes/pi-permission-system@npm:@schuettc/pi-permission-system@<version>"
+  ]
 }
 ```
 
-Order matters: `pi-auto-review` decides first, and only the asks it defers (the
-ones that would otherwise prompt you) reach `pi-hail`, which opens the ask on
-your phone and your Mac at once — the first answer on either device wins, with
-no timeout. Choosing **More options…** on the Mac hands the ask back to the
-permission system's full dialog (session-scope grants, etc.).
+The fork carries the prompt-answerer seam (`registerPromptAnswerer`) pi-hail
+needs. **The requirement is enforced at runtime, visibly.** On startup pi-hail
+looks up the permission service:
 
-The permission system exposes no reader for its chain, so pi-hail cannot detect a
-missing entry: **this README is the only guard.** Without the entry, asks are
-answered on your Mac exactly as before — phone approvals simply do nothing.
+- fork present (the seam is there) → phone approvals work;
+- the plain `@gotgenes` package, or an older fork build without the seam →
+  pi-hail warns **once** (`hail: phone approvals need
+  @schuettc/pi-permission-system`) through pi's UI and the log, and keeps phone
+  approvals disabled; everything else in pi-hail keeps working;
+- no permission system installed at all → pi-hail runs quietly and approvals are
+  simply absent, as before.
+
+**2. Opt pi-hail in** as a prompt answerer in
+`~/.pi/agent/extensions/pi-permission-system/config.json`. Registration alone
+grants nothing; authority comes from this config key (mirroring
+`authorizerChain`):
+
+```json
+{
+  "authorizerChain": ["pi-auto-review"],
+  "promptAnswerers": ["pi-hail"]
+}
+```
+
+With `promptAnswerers` empty (or missing), a phone answer does nothing and the
+Mac dialog stays the only way to answer.
 
 ## Connect / Disconnect (0.3.0)
 
@@ -59,13 +87,20 @@ Daemon replies with `{ "ok": true, "data": { "hostId", "daemonVersion", "accepte
 
 **Then, one object per line, both directions:**
 
-- **extension → daemon:** `{ "event": <pi rpc event verbatim> }` · `{ "turn": "start" | "end" }` · `{ "lock": "held" | "released" }` · `{ "exit": { "code": n } }` · `{ "refused": { "requestId", "reason": "turn_running" } }` · `{ "ask": { "requestId", "title", "message", "toolName"?, "surface"?, "value"? } }` · `{ "askDone": { "requestId", "outcome": "allowed" | "denied" | "deferred", "by": "mac" | "phone" } }`
+- **extension → daemon:** `{ "event": <pi rpc event verbatim> }` · `{ "turn": "start" | "end" }` · `{ "lock": "held" | "released" }` · `{ "exit": { "code": n } }` · `{ "refused": { "requestId", "reason": "turn_running" } }` · `{ "ask": { "requestId", "title", "message", "toolName"?, "surface"?, "value"? } }` · `{ "askDone": { "requestId", "outcome": "allowed" | "denied", "by": "mac" | "phone" } }`
 - **daemon → extension:** `{ "prompt": { "text", "from", "requestId" } }` · `{ "presence": { "phones": [ ... ] } }` · `{ "answer": { "requestId", "value": "allow" | "deny" } }` · `{ "ctl": "stop" }`
 
-An `ask`/`askDone` pair brackets a permission approval: `ask` opens the request
-on the phone (rendered as a confirm card) while pi-hail also opens a Mac dialog;
-the daemon relays the phone's answer back as `{ answer }`, and `askDone` closes
-the request on whichever device did not answer first.
+An `ask`/`askDone` pair brackets a permission approval: `ask` mirrors the
+permission system's own showing prompt to the phone (rendered as a confirm
+card); the daemon relays the phone's answer back as `{ answer }`, which pi-hail
+feeds to the permission system's prompt-answerer seam; and `askDone` closes the
+card once the prompt resolves, carrying `by: "phone"` when the phone answered
+and `by: "mac"` otherwise (the Mac dialog, auto-confirm, a rule, or yolo).
+pi-hail never draws a dialog of its own.
+
+An ask is mirrored to the phone only while the daemon has affirmed the session
+is connected, and only once per `requestId`; the announced set is dropped on
+session end and on re-register (the daemon stale-acks any still-open ask).
 
 The extension refuses a phone `prompt` while the local turn runs; while a phone-originated turn runs, it holds local terminal input behind a visible notice and replays it when the phone's turn ends.
 

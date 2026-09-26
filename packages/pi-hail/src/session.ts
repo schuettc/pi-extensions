@@ -4,14 +4,10 @@
 // state machine, presence, replay, and authorizer land in later tasks — the
 // state fields below are declared now so those tasks only ADD, not rewrite.
 
-import type { PromptPermissionDetails } from "@gotgenes/pi-permission-system";
 import type { Phone, RegisterArgs, RegisterReply } from "./protocol.ts";
 import { entriesAfter, PERSISTED_ROLES, trimFrames } from "./replay.ts";
 import { presenceToStatus } from "./status.ts";
 import { EXTENSION_VERSION } from "./version.ts";
-
-/** A phone-originated permission verdict. `defer` yields to pi's own prompt. */
-export type PhoneDecision = "allow" | "deny" | "defer";
 
 /**
  * Strip the duplicate cumulative snapshot pi carries on a streaming progress
@@ -48,6 +44,24 @@ export function stripProgressPartial(event: unknown): unknown {
   return event;
 }
 
+/**
+ * The subset of the permission system's `permissions:ui_prompt` event the
+ * Session reads to build an { ask } card (spec \u00a7B). Read defensively: the bus
+ * contract may add fields, and every field here may be null/absent. `surface`
+ * and `value` are the normalized display projection; `request` carries the
+ * ask's invariant facts (its gate `surface`, `toolName`, and `value`).
+ */
+export interface UiPromptFacts {
+  requestId: string;
+  surface?: string | null;
+  value?: string | null;
+  request?: {
+    surface?: string | null;
+    toolName?: string | null;
+    value?: string | null;
+  } | null;
+}
+
 /** Which side owns the current turn. `idle` at rest. */
 export type Phase = "idle" | "local_turn" | "phone_turn";
 
@@ -77,17 +91,17 @@ export interface SessionDeps {
     setStatus: (text: string | undefined) => void;
     notify: (msg: string, level?: "info" | "warning" | "error") => void;
     holdInput: (held: boolean) => void;
-    /**
-     * Open a Mac-pane dialog (ctx.ui.select) and return the chosen option, or
-     * undefined when dismissed. The AbortSignal lets the Session dismiss it
-     * programmatically the moment the phone answers first (spec §A).
-     */
-    openDialog: (
-      title: string,
-      options: string[],
-      signal: AbortSignal,
-    ) => Promise<string | undefined>;
   };
+  /**
+   * Settle a *showing* permission prompt remotely, through the permission
+   * system's prompt-answerer seam (spec §A). Wired by the extension to the
+   * registered `PromptAnswerer.answer`; the return value (`false` when no such
+   * prompt is open, already settled, or the answerer is not opted in) is
+   * advisory — the `permissions:decision` event is what closes the phone card.
+   * Absent (no permission system, or the seam disabled) means phone answers are
+   * inert.
+   */
+  answerPrompt?: (requestId: string, verdict: "allow" | "deny") => void;
   /**
    * pi's IN-MEMORY entry list (ctx.sessionManager.getEntries(), which excludes
    * the "session" header). The cursor unit is an index into this list; it is the
@@ -163,29 +177,14 @@ export class Session {
   private presenceText: string | undefined = undefined;
 
   /**
-   * Permission gates the phone is being asked to answer, keyed by requestId.
-   * Each resolver is fulfilled by an inbound { answer } (or resolved "defer" by
-   * the authorizer's timeout, which then discards its own entry). Resolvers only
-   * ever resolve — never reject — so a decision left dangling at session end
-   * cannot surface as an unhandled rejection.
+   * Asks announced to the phone (as an { ask } frame), keyed by requestId. The
+   * permission system's own dialog owns each ask's lifecycle; a later
+   * `permissions:decision` for an announced requestId closes the phone's card
+   * via onDecision and forgets it. A decision for any other requestId is
+   * ignored. Dropped wholesale on session end / re-register so a torn-down
+   * session leaves nothing lingering.
    */
-  private pendingDecisions = new Map<string, (v: PhoneDecision) => void>();
-
-  /**
-   * Asks pi-hail settled with `defer` (Mac "More options…" / dismissed), whose
-   * lifecycle the permission system's own dialog now owns. A later
-   * `permissions:decision` for one of these closes the phone's card via
-   * onDecision (Task P3); a decision for any other requestId is ignored.
-   */
-  private deferredAsks = new Set<string>();
-
-  /**
-   * Bumped whenever in-flight asks are abandoned (session shutdown / reconnect).
-   * Each ask captures the generation at open time; a late settlement whose
-   * generation no longer matches is dropped silently (no askDone, no deferred
-   * entry) so a torn-down / re-registered session leaves nothing lingering.
-   */
-  private asksGeneration = 0;
+  private announcedAsks = new Set<string>();
 
   /** Daemon's last-seen device sequence number, from the register reply. */
   private have: number | undefined = undefined;
@@ -317,9 +316,10 @@ export class Session {
   /** Handles the register reply: stores replay cursor; refuses on mismatch. */
   onRegisterReply(reply: RegisterReply): void {
     if (reply.ok) {
-      // A reconnect re-registers: abandon any ask that was in flight across the
-      // gap (the daemon re-affirms connection fresh) so nothing lingers.
-      if (this.hasRegistered) this.clearPendingAsks();
+      // A reconnect re-registers: drop any ask announced across the gap (the
+      // daemon re-affirms connection fresh and stale-acks open asks) so nothing
+      // lingers.
+      if (this.hasRegistered) this.clearAnnouncedAsks();
       // Stored for diagnostics only: the daemon now drives catch-up via a
       // {"resend":{since}} frame (streaming spec §4.3), so registration no
       // longer replays here.
@@ -419,21 +419,16 @@ export class Session {
   exit(code: number): void {
     if (!this.isActive) return;
     this.sendBoundary({ exit: { code } });
-    this.clearPendingAsks();
+    this.clearAnnouncedAsks();
   }
 
   /**
-   * Abandon every in-flight / deferred ask: resolve each awaiting decision to
-   * "defer" (so the authorizer unblocks and pi's own prompt runs) and drop both
-   * bookkeeping sets. Bumping the generation first means the resolved decisions'
-   * late settlements emit no askDone and re-add no deferred entry.
+   * Drop every announced ask. The permission system's own dialog still owns
+   * each ask's lifecycle; the daemon stale-acks any open ask on extension exit
+   * / re-register, so pi-hail simply forgets them (no askDone).
    */
-  private clearPendingAsks(): void {
-    this.asksGeneration++;
-    const resolvers = [...this.pendingDecisions.values()];
-    this.pendingDecisions.clear();
-    this.deferredAsks.clear();
-    for (const resolve of resolvers) resolve("defer");
+  private clearAnnouncedAsks(): void {
+    this.announcedAsks.clear();
   }
 
   /** Daemon → extension frame dispatch. Cases land in Tasks 5, 6, 8. */
@@ -486,12 +481,13 @@ export class Session {
     }
     if ("answer" in m) {
       const answer = m.answer as { requestId: string; value: unknown };
-      const resolve = this.pendingDecisions.get(answer.requestId);
-      if (resolve) {
-        this.pendingDecisions.delete(answer.requestId);
-        // Map the phone's value to a verdict; anything unknown is a safe defer.
-        const value = answer.value;
-        resolve(value === "allow" ? "allow" : value === "deny" ? "deny" : "defer");
+      // Route the phone's verdict to the permission system's prompt-answerer
+      // seam. A `false` return (no such showing prompt, or the seam disabled) is
+      // a no-op here \u2014 the permissions:decision event closes the card. Unknown
+      // values are ignored (never an implicit allow).
+      const value = answer.value;
+      if (value === "allow" || value === "deny") {
+        this.deps.answerPrompt?.(answer.requestId, value);
       }
       return;
     }
@@ -502,37 +498,28 @@ export class Session {
   }
 
   /**
-   * A permission gate reaching pi-hail's chain link. When inert, or until the
-   * daemon has affirmed this session is connected to phones, resolve "defer"
-   * immediately so the permission system's own Mac dialog runs unchanged. Only
-   * asks auto-review already deferred reach here.
+   * Mirror the permission system's own prompt to the phone as an { ask } frame
+   * (spec §B). pi-hail draws no dialog of its own: the permission system owns the
+   * single dialog, and the phone answers that same prompt through the
+   * prompt-answerer seam. An ask is announced ONLY while the daemon has affirmed
+   * this session is connected to phones — otherwise there is nowhere to show it
+   * and the Mac dialog is the only surface.
    *
-   * Otherwise open the ask on BOTH surfaces at once and let the first answer
-   * win (spec §A):
-   *   - phone: an { ask } frame the daemon renders as a confirm card;
-   *   - Mac:   a select dialog (Allow / Deny / More options…) we can dismiss
-   *            programmatically the moment the phone answers.
-   * There is NO timeout — a human on either device is awaited. Whichever way it
-   * settles, exactly ONE { askDone } frame tells the daemon who answered and how.
-   * Never throws, and never leaves a phantom card: a Mac dialog that rejects or
-   * throws (sync or on abort) maps to a Mac "defer", and cleanup on
-   * shutdown/reconnect resolves any dangling decision to "defer".
+   * `title`/`message` are derived from the `permissions:ui_prompt` event's
+   * `surface`/`value` and its invariant `request` facts, so the card reads like
+   * "Allow bash?" plus the command/path. Each requestId is announced at most once
+   * and tracked; a later `permissions:decision` closes it.
    */
-  requestPhoneDecision(details: PromptPermissionDetails): Promise<PhoneDecision> {
-    if (!this.isActive || !this.connected) {
-      return Promise.resolve("defer");
-    }
-    const requestId = details.requestId;
-    // Duplicate-requestId guard BEFORE any side effect: pi serializes asks, so a
-    // live duplicate should never happen; if it does, defer immediately without
-    // sending a second ask frame or opening a second Mac dialog.
-    if (this.pendingDecisions.has(requestId)) {
-      return Promise.resolve("defer");
-    }
+  announceAsk(event: UiPromptFacts): void {
+    if (!this.isActive || !this.connected) return;
+    const requestId = event.requestId;
+    if (!requestId || this.announcedAsks.has(requestId)) return;
 
-    const label = details.toolName ?? details.surface ?? "this";
-    const title = `Allow ${label}?`;
-    const message = firstPreview(details);
+    const request = event.request ?? undefined;
+    const toolName = optString(request?.toolName);
+    const surface = optString(event.surface) ?? optString(request?.surface);
+    const value = optString(event.value) ?? optString(request?.value) ?? "";
+    const label = toolName ?? surface ?? "this";
 
     const ask: {
       requestId: string;
@@ -541,73 +528,29 @@ export class Session {
       toolName?: string;
       surface?: string;
       value?: string;
-    } = { requestId, title, message };
-    if (details.toolName) ask.toolName = details.toolName;
-    if (details.surface) ask.surface = details.surface;
-    if (details.value != null) ask.value = details.value;
+    } = { requestId, title: `Allow ${label}?`, message: value };
+    if (toolName) ask.toolName = toolName;
+    if (surface) ask.surface = surface;
+    if (value) ask.value = value;
+
+    this.announcedAsks.add(requestId);
     this.sendBoundary({ ask });
-
-    const gen = this.asksGeneration;
-    const ac = new AbortController();
-
-    const phoneP = new Promise<PhoneDecision>((resolve) => {
-      this.pendingDecisions.set(requestId, resolve);
-    });
-
-    // The Mac side: a synchronous throw becomes a rejection inside this async
-    // wrapper, and ANY rejection (throw, or a UI that rejects on abort) maps to
-    // a Mac "defer" — the ask was already announced, so it must still settle.
-    const macP: Promise<PhoneDecision> = (async () =>
-      macChoiceToDecision(
-        await this.deps.ui.openDialog(
-          `${title}\n${message}`,
-          ["Allow", "Deny", "More options…"],
-          ac.signal,
-        ),
-      ))().catch(() => "defer" as PhoneDecision);
-
-    let settled = false;
-    const finish = (by: "phone" | "mac", decision: PhoneDecision): PhoneDecision => {
-      if (settled) return decision;
-      settled = true;
-      // First answer wins: drop the pending resolver and dismiss the Mac dialog
-      // (a no-op if it already closed).
-      this.pendingDecisions.delete(requestId);
-      ac.abort();
-      // Abandoned across a shutdown/reconnect: settle the awaiting authorizer to
-      // defer but emit nothing and record nothing.
-      if (gen !== this.asksGeneration) return decision;
-      const outcome =
-        decision === "allow" ? "allowed" : decision === "deny" ? "denied" : "deferred";
-      // A deferred ask is now the permission system's to close (Task P3);
-      // anything else is terminal here.
-      if (outcome === "deferred") this.deferredAsks.add(requestId);
-      this.sendBoundary({ askDone: { requestId, outcome, by } });
-      return decision;
-    };
-
-    return (async () => {
-      const winner = await Promise.race([
-        phoneP.then((decision) => ({ by: "phone" as const, decision })),
-        macP.then((decision) => ({ by: "mac" as const, decision })),
-      ]);
-      return finish(winner.by, winner.decision);
-    })();
   }
 
   /**
-   * The permission system settled an ask pi-hail had deferred to its own Mac
-   * dialog (via `permissions:decision`). Close the phone's card with an askDone
-   * carrying the final outcome, attributed to the Mac. A decision for a
-   * requestId pi-hail never deferred (answered here, or never announced) is
-   * ignored, and each deferred ask closes only once.
+   * The permission system's own dialog settled an announced ask (via
+   * `permissions:decision`). Close the phone's card with an askDone carrying the
+   * final outcome and who answered: `phone` when the decision came through the
+   * prompt-answerer seam (the extension maps `decidedBy`), else `mac` (dialog,
+   * auto-confirm, rule, yolo, …). A decision for a requestId pi-hail never
+   * announced is ignored, and each ask closes only once.
    */
-  onDecision(requestId: string, result: "allow" | "deny"): void {
+  onDecision(requestId: string, result: "allow" | "deny", by: "mac" | "phone"): void {
     if (!this.isActive) return;
-    if (!this.deferredAsks.has(requestId)) return;
-    this.deferredAsks.delete(requestId);
+    if (!this.announcedAsks.has(requestId)) return;
+    this.announcedAsks.delete(requestId);
     this.sendBoundary({
-      askDone: { requestId, outcome: result === "allow" ? "allowed" : "denied", by: "mac" },
+      askDone: { requestId, outcome: result === "allow" ? "allowed" : "denied", by },
     });
   }
 
@@ -676,27 +619,7 @@ export class Session {
   }
 }
 
-/**
- * The command/path/value preview an ask carries, in priority order: the first
- * present, non-empty string among command, path, toolInputPreview, value. The
- * phone renders this as the card's message so it is never blank.
- */
-function firstPreview(details: PromptPermissionDetails): string {
-  const candidates = [
-    details.command,
-    details.path,
-    details.toolInputPreview,
-    details.value ?? undefined,
-  ];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.length > 0) return c;
-  }
-  return "";
-}
-
-/** Map the Mac select choice to a verdict; dismissed (undefined) is a defer. */
-function macChoiceToDecision(choice: string | undefined): PhoneDecision {
-  if (choice === "Allow") return "allow";
-  if (choice === "Deny") return "deny";
-  return "defer"; // "More options…" or Esc/dismissed — never an implicit allow.
+/** A non-empty string, or undefined for null / "" / non-strings. */
+function optString(v: unknown): string | undefined {
+  return typeof v === "string" && v.length > 0 ? v : undefined;
 }

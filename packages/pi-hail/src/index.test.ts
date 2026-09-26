@@ -267,108 +267,128 @@ test("failed connect does not throw from session_start", async () => {
   }
 });
 
-// Guards (P3): pi-hail no longer forwards permissions:ui_prompt \u2014 the blank
-// phantom card that had only Deny is gone.
-test("permissions:ui_prompt is no longer forwarded to the phone", async () => {
+// ── T2.4: register the prompt answerer on permissions:ready ─────────────────
+
+/** A fake PromptAnswerer whose answer/dispose calls are recorded. */
+function makeAnswerer() {
+  const answers = spy<[string, "allow" | "deny"]>();
+  const dispose = spy<[]>();
+  return { answer: (r: string, v: "allow" | "deny") => (answers(r, v), true), dispose, answers };
+}
+
+/** A ctx whose ui.notify is a spy the test can inspect (captured at start). */
+function ctxWithNotify() {
+  const notify = spy<[string, unknown]>();
+  const ctx = makeCtx({ ui: { setStatus: spy<[string, unknown]>(), notify } });
+  return { ctx, notify };
+}
+
+/** Capture console.error while `fn` runs; return the recorded arg lists. */
+async function captureConsoleError(fn: () => Promise<void>): Promise<unknown[][]> {
+  const errors: unknown[][] = [];
+  const orig = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args);
+  };
+  try {
+    await fn();
+  } finally {
+    console.error = orig;
+  }
+  return errors;
+}
+
+// Guards (E.3, case 1): a service carrying the fork's seam registers the
+// "pi-hail" answerer once, idempotent across repeat readies, disposed on quit.
+test("permissions:ready registers the pi-hail answerer (idempotent), disposed on quit", async () => {
   const { pi, fire, fireBus } = makeFakePi();
   const fake = new FakeDuplex();
-  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  const answerer = makeAnswerer();
+  const names: string[] = [];
+  const service = {
+    registerPromptAnswerer: (name: string) => {
+      names.push(name);
+      return answerer;
+    },
+  };
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => service as never });
   fire("session_start", {}, makeCtx());
   await tick();
   await tick();
   fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
   await tick();
-  const before = fake.writes.length;
-  fireBus("permissions:ui_prompt", { requestId: "r1", payload: {} });
+  fireBus("permissions:ready", { sessionId: "S" });
   await tick();
-  assert.equal(fake.writes.length, before, "permissions:ui_prompt must produce no frame");
+  assert.deepEqual(names, ["pi-hail"]);
+  // A repeat ready must not register again.
+  fireBus("permissions:ready", { sessionId: "S" });
+  await tick();
+  assert.deepEqual(names, ["pi-hail"], "registration is idempotent across repeat readies");
+  // A clean quit disposes the answerer.
+  fire("session_shutdown", { reason: "quit" }, makeCtx());
+  assert.equal(answerer.dispose.calls.length, 1, "answerer disposed on quit");
 });
 
-// Guards (P3): an ask pi-hail defers is closed on the phone when the permission
-// system's own dialog decides it \u2014 permissions:decision \u2192 askDone allowed/mac.
-test("permissions:decision closes a deferred ask on the wire (allowed/mac)", async () => {
+// Guards (E.3, case 2): a permission service WITHOUT the fork's seam warns once,
+// visibly (pi UI notify + console.error), and keeps phone approvals disabled.
+test("a service without registerPromptAnswerer warns once and registers no answerer", async () => {
   const { pi, fire, fireBus } = makeFakePi();
   const fake = new FakeDuplex();
-  // Capture the authorizer the extension registers on permissions:ready.
-  let authorize:
-    | ((d: unknown, q: unknown, l: unknown) => Promise<{ kind: string }>)
-    | undefined;
-  const service = {
-    registerAuthorizer: (_name: string, fn: typeof authorize) => {
-      authorize = fn;
-      return () => {};
-    },
-  };
-  // A controllable Mac select dialog (ctx.ui.select).
-  let resolveSelect: (v: string | undefined) => void = () => {};
-  const select = (_t: string, _o: string[], _opts?: unknown) =>
-    new Promise<string | undefined>((r) => {
-      resolveSelect = r;
-    });
-  const ctx = makeCtx({
-    ui: { setStatus: spy<[string, unknown]>(), notify: spy<[string, unknown]>(), select },
-  });
-  createExtension(pi, {
-    connect: async () => fake,
-    getPermissionsService: () => service as never,
-  });
+  // Plain upstream shape: registerAuthorizer present, registerPromptAnswerer absent.
+  const service = { registerAuthorizer: () => () => {} };
+  const { ctx, notify } = ctxWithNotify();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => service as never });
   fire("session_start", {}, ctx);
   await tick();
   await tick();
   fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
   await tick();
-  // The daemon affirms the session is connected to phones (sent on every
-  // accepted register); only then does pi-hail open a phone ask.
-  fake.push('{"connection":"connected"}\n');
-  await tick();
-  fireBus("permissions:ready", { sessionId: "S" });
-  await tick();
-  assert.ok(authorize, "expected the extension to register an authorizer");
-  const verdictP = authorize({ requestId: "r1", toolName: "bash", command: "rm x" }, {}, {
-    review() {},
-    debug() {},
+  const errors = await captureConsoleError(async () => {
+    fireBus("permissions:ready", { sessionId: "S" });
+    await tick();
+    fireBus("permissions:ready", { sessionId: "S" }); // repeat: still once
+    await tick();
   });
-  await tick();
-  resolveSelect("More options\u2026"); // Mac defers to the permission dialog
-  assert.deepEqual(await verdictP, { kind: "defer" });
-  fireBus("permissions:decision", { requestId: "r1", result: "allow" });
-  await tick();
-  const frames = fake.writes.map((w) => JSON.parse(w));
-  const askDones = frames.map((f) => f.askDone).filter((a) => a !== undefined);
-  // The deferral emits askDone deferred/mac; the decision collapses it to
-  // allowed/mac \u2014 assert the final close.
-  assert.deepEqual(askDones.at(-1), { requestId: "r1", outcome: "allowed", by: "mac" });
-  assert.deepEqual(askDones.at(0), { requestId: "r1", outcome: "deferred", by: "mac" });
+  const wanted = "hail: phone approvals need @schuettc/pi-permission-system";
+  const warnNotifies = notify.calls.filter((c) => c[0] === wanted && c[1] === "warning");
+  assert.equal(warnNotifies.length, 1, "warns exactly once through pi's UI");
+  const warnLogs = errors.filter((e) => e[0] === wanted);
+  assert.equal(warnLogs.length, 1, "logs the warning once");
 });
 
-// Guards (fix): when the control socket drops, pi-hail falls back to NOT
-// connected \u2014 an ask defers to pi's normal prompt without opening a phone ask or
-// a Mac dialog, until the daemon re-affirms the session.
-test("a dropped socket makes pi-hail defer asks (no ask frame, no Mac dialog)", async () => {
+// Guards (E.3, case 3): no permission system at all \u2014 pi-hail is quiet, no
+// warning through the UI or the console; approvals are simply absent.
+test("no permission system: quiet, no warning", async () => {
   const { pi, fire, fireBus } = makeFakePi();
   const fake = new FakeDuplex();
-  let authorize:
-    | ((d: unknown, q: unknown, l: unknown) => Promise<{ kind: string }>)
-    | undefined;
-  const service = {
-    registerAuthorizer: (_name: string, fn: typeof authorize) => {
-      authorize = fn;
-      return () => {};
-    },
-  };
-  const selectCalls: string[] = [];
-  const select = (title: string) => {
-    selectCalls.push(title);
-    return new Promise<string | undefined>(() => {});
-  };
-  const ctx = makeCtx({
-    ui: { setStatus: spy<[string, unknown]>(), notify: spy<[string, unknown]>(), select },
+  const { ctx, notify } = ctxWithNotify();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  const errors = await captureConsoleError(async () => {
+    fireBus("permissions:ready", { sessionId: "S" });
+    await tick();
   });
+  assert.equal(notify.calls.length, 0, "no UI notification when there is no permission system");
+  assert.equal(errors.length, 0, "no console warning when there is no permission system");
+});
+
+// \u2500\u2500 T2.5/T2.6: mirror ui_prompt \u2192 ask, answer, and close on decision \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+/** Wire up an owning session with the fork's seam registered and connected. */
+async function startWithAnswerer() {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  const answerer = makeAnswerer();
+  const service = { registerPromptAnswerer: () => answerer };
   createExtension(pi, {
     connect: async () => fake,
     getPermissionsService: () => service as never,
   });
-  fire("session_start", {}, ctx);
+  fire("session_start", {}, makeCtx());
   await tick();
   await tick();
   fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
@@ -377,22 +397,100 @@ test("a dropped socket makes pi-hail defer asks (no ask frame, no Mac dialog)", 
   await tick();
   fireBus("permissions:ready", { sessionId: "S" });
   await tick();
-  assert.ok(authorize);
-  // The control socket drops (daemon unreachable).
-  fake.emit("close");
-  await tick();
-  const before = fake.writes.length;
-  const verdict = await authorize({ requestId: "r9", toolName: "bash", command: "rm x" }, {}, {
-    review() {},
-    debug() {},
+  return { pi, fire, fireBus, fake, answerer };
+}
+
+function asks(fake: FakeDuplex): Record<string, unknown>[] {
+  return fake.writes.map((w) => JSON.parse(w)).filter((f) => f.ask).map((f) => f.ask);
+}
+function askDones(fake: FakeDuplex): Record<string, unknown>[] {
+  return fake.writes.map((w) => JSON.parse(w)).filter((f) => f.askDone).map((f) => f.askDone);
+}
+
+// Guards (T2.5): permissions:ui_prompt is mirrored to the phone as an { ask }
+// while connected, derived from the event's surface/value + request facts.
+test("permissions:ui_prompt is mirrored as an { ask } when connected", async () => {
+  const { fireBus, fake } = await startWithAnswerer();
+  fireBus("permissions:ui_prompt", {
+    requestId: "r1",
+    surface: "bash",
+    value: "rm -rf x",
+    request: { surface: "bash", toolName: "bash", value: "rm -rf x" },
   });
-  assert.deepEqual(verdict, { kind: "defer" });
-  assert.equal(selectCalls.length, 0, "no Mac dialog while disconnected");
-  const askFrames = fake.writes
-    .slice(before)
-    .map((w) => JSON.parse(w))
-    .filter((f) => f.ask !== undefined);
-  assert.equal(askFrames.length, 0, "no { ask } frame while disconnected");
+  await tick();
+  assert.deepEqual(asks(fake), [
+    { requestId: "r1", title: "Allow bash?", message: "rm -rf x", toolName: "bash", surface: "bash", value: "rm -rf x" },
+  ]);
+});
+
+// Guards (T2.5): with no affirmed connection, ui_prompt produces no ask frame.
+test("permissions:ui_prompt sends no ask while the session is not connected", async () => {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  const answerer = makeAnswerer();
+  const service = { registerPromptAnswerer: () => answerer };
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => service as never });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fireBus("permissions:ready", { sessionId: "S" }); // registered but NOT connected
+  await tick();
+  fireBus("permissions:ui_prompt", { requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } });
+  await tick();
+  assert.equal(asks(fake).length, 0, "no ask frame while disconnected");
+});
+
+// Guards (T2.5): a phone answer is routed to the registered answerer's answer().
+test("an inbound phone answer calls answerer.answer(requestId, value)", async () => {
+  const { fake, answerer } = await startWithAnswerer();
+  fake.push('{"answer":{"requestId":"r1","value":"allow"}}\n');
+  await tick();
+  assert.deepEqual(answerer.answers.calls, [["r1", "allow"]]);
+});
+
+// Guards (T2.6): a decision through the answerer seam closes the card by phone.
+test("permissions:decision by the pi-hail answerer closes the ask by phone", async () => {
+  const { fireBus, fake } = await startWithAnswerer();
+  fireBus("permissions:ui_prompt", { requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } });
+  await tick();
+  fireBus("permissions:decision", {
+    requestId: "r1",
+    result: "allow",
+    decidedBy: { kind: "answerer", name: "pi-hail" },
+  });
+  await tick();
+  assert.deepEqual(askDones(fake).at(-1), { requestId: "r1", outcome: "allowed", by: "phone" });
+});
+
+// Guards (T2.6): any other decider closes the card by mac, and outcome maps
+// result allow\u2192allowed / deny\u2192denied; the requestId is then forgotten.
+test("permissions:decision by any other decider closes the ask by mac, then forgets it", async () => {
+  const { fireBus, fake } = await startWithAnswerer();
+  fireBus("permissions:ui_prompt", { requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } });
+  await tick();
+  fireBus("permissions:decision", {
+    requestId: "r1",
+    result: "deny",
+    decidedBy: { kind: "user", via: "dialog" },
+  });
+  await tick();
+  assert.deepEqual(askDones(fake).at(-1), { requestId: "r1", outcome: "denied", by: "mac" });
+  // Forgotten: a second decision for the same requestId sends nothing more.
+  const before = fake.writes.length;
+  fireBus("permissions:decision", { requestId: "r1", result: "allow", decidedBy: { kind: "yolo", pattern: null } });
+  await tick();
+  assert.equal(fake.writes.length, before, "an announced ask closes only once");
+});
+
+// Guards (T2.6): a decision for a requestId pi-hail never announced is ignored.
+test("permissions:decision for an unannounced requestId sends nothing", async () => {
+  const { fireBus, fake } = await startWithAnswerer();
+  const before = fake.writes.length;
+  fireBus("permissions:decision", { requestId: "never", result: "allow", decidedBy: { kind: "user", via: "dialog" } });
+  await tick();
+  assert.equal(fake.writes.length, before);
 });
 
 // Guards: pi quit emits an exit frame with the code.

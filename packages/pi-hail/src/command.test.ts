@@ -12,7 +12,6 @@ function sessionWithSends() {
       setStatus: () => {},
       notify: () => {},
       holdInput: () => {},
-      openDialog: () => Promise.resolve(undefined),
     },
     getEntries: () => [],
   };
