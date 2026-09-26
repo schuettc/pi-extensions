@@ -267,6 +267,115 @@ test("failed connect does not throw from session_start", async () => {
   }
 });
 
+// ── T2.4: register the prompt answerer on permissions:ready ─────────────────
+
+/** A fake PromptAnswerer whose answer/dispose calls are recorded. */
+function makeAnswerer() {
+  const answers = spy<[string, "allow" | "deny"]>();
+  const dispose = spy<[]>();
+  return { answer: (r: string, v: "allow" | "deny") => (answers(r, v), true), dispose, answers };
+}
+
+/** A ctx whose ui.notify is a spy the test can inspect (captured at start). */
+function ctxWithNotify() {
+  const notify = spy<[string, unknown]>();
+  const ctx = makeCtx({ ui: { setStatus: spy<[string, unknown]>(), notify } });
+  return { ctx, notify };
+}
+
+/** Capture console.error while `fn` runs; return the recorded arg lists. */
+async function captureConsoleError(fn: () => Promise<void>): Promise<unknown[][]> {
+  const errors: unknown[][] = [];
+  const orig = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args);
+  };
+  try {
+    await fn();
+  } finally {
+    console.error = orig;
+  }
+  return errors;
+}
+
+// Guards (E.3, case 1): a service carrying the fork's seam registers the
+// "pi-hail" answerer once, idempotent across repeat readies, disposed on quit.
+test("permissions:ready registers the pi-hail answerer (idempotent), disposed on quit", async () => {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  const answerer = makeAnswerer();
+  const names: string[] = [];
+  const service = {
+    registerPromptAnswerer: (name: string) => {
+      names.push(name);
+      return answerer;
+    },
+  };
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => service as never });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fireBus("permissions:ready", { sessionId: "S" });
+  await tick();
+  assert.deepEqual(names, ["pi-hail"]);
+  // A repeat ready must not register again.
+  fireBus("permissions:ready", { sessionId: "S" });
+  await tick();
+  assert.deepEqual(names, ["pi-hail"], "registration is idempotent across repeat readies");
+  // A clean quit disposes the answerer.
+  fire("session_shutdown", { reason: "quit" }, makeCtx());
+  assert.equal(answerer.dispose.calls.length, 1, "answerer disposed on quit");
+});
+
+// Guards (E.3, case 2): a permission service WITHOUT the fork's seam warns once,
+// visibly (pi UI notify + console.error), and keeps phone approvals disabled.
+test("a service without registerPromptAnswerer warns once and registers no answerer", async () => {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  // Plain upstream shape: registerAuthorizer present, registerPromptAnswerer absent.
+  const service = { registerAuthorizer: () => () => {} };
+  const { ctx, notify } = ctxWithNotify();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => service as never });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  const errors = await captureConsoleError(async () => {
+    fireBus("permissions:ready", { sessionId: "S" });
+    await tick();
+    fireBus("permissions:ready", { sessionId: "S" }); // repeat: still once
+    await tick();
+  });
+  const wanted = "hail: phone approvals need @schuettc/pi-permission-system";
+  const warnNotifies = notify.calls.filter((c) => c[0] === wanted && c[1] === "warning");
+  assert.equal(warnNotifies.length, 1, "warns exactly once through pi's UI");
+  const warnLogs = errors.filter((e) => e[0] === wanted);
+  assert.equal(warnLogs.length, 1, "logs the warning once");
+});
+
+// Guards (E.3, case 3): no permission system at all \u2014 pi-hail is quiet, no
+// warning through the UI or the console; approvals are simply absent.
+test("no permission system: quiet, no warning", async () => {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  const { ctx, notify } = ctxWithNotify();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  const errors = await captureConsoleError(async () => {
+    fireBus("permissions:ready", { sessionId: "S" });
+    await tick();
+  });
+  assert.equal(notify.calls.length, 0, "no UI notification when there is no permission system");
+  assert.equal(errors.length, 0, "no console warning when there is no permission system");
+});
+
 // Guards: pi quit emits an exit frame with the code.
 test("session_shutdown reason 'quit' emits { exit }", async () => {
   const { pi, fire } = makeFakePi();
