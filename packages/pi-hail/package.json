@@ -9,5 +9,5 @@
   "files": ["src", "README.md"],
   "pi": { "extensions": ["./src/index.ts"] },
   "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json", "test": "node --test src/*.test.ts", "test:integration": "node --test src/integration.test.ts" },
-  "devDependencies": { "@earendil-works/pi-coding-agent": "^0.84.3", "@gotgenes/pi-permission-system": "^30.2.0", "typescript": "^5.6.0" }
+  "devDependencies": { "@earendil-works/pi-coding-agent": "^0.84.3", "@gotgenes/pi-permission-system": "npm:@schuettc/pi-permission-system@34.0.1-schuettc.2", "typescript": "^5.6.0" }
 }
