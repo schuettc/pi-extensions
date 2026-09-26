@@ -622,6 +622,62 @@ test("resend replays message entries after since with cursor since+i+1 then done
   ]);
 });
 
+// T1.2 \u2014 onResend(since, limit): limit 0 (or absent) is uncapped \u2014 all frames
+// after `since`, no marker, then done (today's behavior).
+test("onResend with limit 0 replays every frame after since with no marker", () => {
+  const r = recDeps();
+  r.entries = [
+    { type: "message", message: { role: "assistant" } }, // 1
+    { type: "message", message: { role: "assistant" } }, // 2
+    { type: "message", message: { role: "assistant" } }, // 3
+  ];
+  const s = new Session(r.deps);
+  s.onResend(0, 0);
+  assert.deepEqual(r.sent, [
+    { event: { type: "message_end", message: { role: "assistant" } }, replay: true, cursor: 1 },
+    { event: { type: "message_end", message: { role: "assistant" } }, replay: true, cursor: 2 },
+    { event: { type: "message_end", message: { role: "assistant" } }, replay: true, cursor: 3 },
+    { resend: "done" },
+  ]);
+});
+
+// T1.2 \u2014 more frames than limit: FIRST a hail_history_trimmed marker carrying
+// the count skipped and the cursor of the LAST skipped frame, THEN exactly
+// `limit` kept frames with their TRUE absolute cursors, THEN done.
+test("onResend caps to the last `limit` frames and prepends a trimmed marker", () => {
+  const r = recDeps();
+  r.entries = [
+    { type: "message", message: { role: "assistant", content: "a" } }, // 1
+    { type: "message", message: { role: "assistant", content: "b" } }, // 2
+    { type: "message", message: { role: "assistant", content: "c" } }, // 3
+    { type: "message", message: { role: "assistant", content: "d" } }, // 4
+  ];
+  const s = new Session(r.deps);
+  s.onResend(0, 2);
+  assert.deepEqual(r.sent, [
+    { event: { type: "hail_history_trimmed", skipped: 2 }, replay: true, cursor: 2 },
+    { event: { type: "message_end", message: { role: "assistant", content: "c" } }, replay: true, cursor: 3 },
+    { event: { type: "message_end", message: { role: "assistant", content: "d" } }, replay: true, cursor: 4 },
+    { resend: "done" },
+  ]);
+});
+
+// T1.2 \u2014 fewer/equal frames than limit: NO marker, all frames, done.
+test("onResend with frames <= limit sends no marker", () => {
+  const r = recDeps();
+  r.entries = [
+    { type: "message", message: { role: "assistant", content: "a" } }, // 1
+    { type: "message", message: { role: "assistant", content: "b" } }, // 2
+  ];
+  const s = new Session(r.deps);
+  s.onResend(0, 2);
+  assert.deepEqual(r.sent, [
+    { event: { type: "message_end", message: { role: "assistant", content: "a" } }, replay: true, cursor: 1 },
+    { event: { type: "message_end", message: { role: "assistant", content: "b" } }, replay: true, cursor: 2 },
+    { resend: "done" },
+  ]);
+});
+
 // Guards (a) \u2014 the pinning test for pi's ordering: at message_end, extensions run
 // BEFORE sessionManager.appendMessage persists the entry, so getEntries() is one
 // short. The reported cursor (getEntries().length + 1) must equal the entry's
