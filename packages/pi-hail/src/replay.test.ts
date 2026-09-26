@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesAfter, PERSISTED_ROLES } from "./replay.ts";
+import { entriesAfter, PERSISTED_ROLES, trimFrames } from "./replay.ts";
+import type { ReplayFrame } from "./replay.ts";
 
 // entriesAfter is a PURE helper over pi's in-memory entry list
 // (sessionManager.getEntries()). The cursor unit is an index into that list.
@@ -112,4 +113,34 @@ test("replay roles equal the live PERSISTED_ROLES set (message roles + custom)",
   const replayMessageRoles = ["user", "assistant", "toolResult", "system"];
   const replayCovered = new Set([...replayMessageRoles, "custom"]);
   assert.deepEqual([...replayCovered].sort(), [...PERSISTED_ROLES].sort());
+});
+
+// trimFrames is a PURE slice: given already-computed replay frames (from
+// entriesAfter, each carrying its true absolute cursor) and a limit, it keeps
+// only the LAST `limit` frames and reports how many were skipped plus the
+// absolute cursor of the last dropped frame (so the daemon's stored cursor can
+// advance past the whole skipped range). limit 0 means no trim.
+function frame(cursor: number): ReplayFrame {
+  return { event: { type: "message_end", message: { role: "assistant", cursor } }, cursor };
+}
+
+test("trimFrames with limit 0 keeps everything (no trim)", () => {
+  const frames = [frame(1), frame(2), frame(3)];
+  assert.deepEqual(trimFrames(frames, 0), { kept: frames, skipped: 0, lastSkippedCursor: 0 });
+});
+
+test("trimFrames keeps all when length <= limit", () => {
+  const frames = [frame(1), frame(2)];
+  assert.deepEqual(trimFrames(frames, 2), { kept: frames, skipped: 0, lastSkippedCursor: 0 });
+  assert.deepEqual(trimFrames(frames, 5), { kept: frames, skipped: 0, lastSkippedCursor: 0 });
+});
+
+test("trimFrames keeps the last `limit`, reports skipped and the last dropped cursor", () => {
+  const frames = [frame(10), frame(11), frame(12), frame(13), frame(14)];
+  const result = trimFrames(frames, 2);
+  // last 2 frames kept with their TRUE absolute cursors
+  assert.deepEqual(result.kept, [frame(13), frame(14)]);
+  assert.equal(result.skipped, 3);
+  // the [skipped-1] frame's cursor = frames[2].cursor = 12
+  assert.equal(result.lastSkippedCursor, 12);
 });

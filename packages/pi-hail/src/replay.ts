@@ -48,6 +48,28 @@ const MESSAGE_ROLES = new Set(["user", "assistant", "toolResult", "system"]);
 // entries — so the live and replay coverage can never drift.
 export const PERSISTED_ROLES: ReadonlySet<string> = new Set([...MESSAGE_ROLES, "custom"]);
 
+// A PURE cap over already-computed replay frames. Given the frames from
+// entriesAfter (each carrying its true absolute cursor) and a `limit`, keep only
+// the LAST `limit` frames and report how many were dropped plus the absolute
+// cursor of the last dropped frame — so the daemon can advance its stored cursor
+// past the whole skipped range via a single trimmed marker. `limit` 0 (or any
+// non-positive) means "no limit": keep everything, skipped 0. When nothing is
+// dropped, lastSkippedCursor is 0. Kept frames retain their true cursors.
+export function trimFrames(
+  frames: ReplayFrame[],
+  limit: number,
+): { kept: ReplayFrame[]; skipped: number; lastSkippedCursor: number } {
+  if (!Number.isFinite(limit) || limit <= 0 || frames.length <= limit) {
+    return { kept: frames, skipped: 0, lastSkippedCursor: 0 };
+  }
+  const skipped = frames.length - limit;
+  return {
+    kept: frames.slice(skipped),
+    skipped,
+    lastSkippedCursor: frames[skipped - 1].cursor,
+  };
+}
+
 export function entriesAfter(entries: unknown[], since: number): ReplayFrame[] {
   const from = Number.isFinite(since) && since > 0 ? since : 0;
   const frames: ReplayFrame[] = [];
