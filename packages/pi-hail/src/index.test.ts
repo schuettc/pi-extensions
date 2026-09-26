@@ -403,6 +403,9 @@ async function startWithAnswerer() {
 function asks(fake: FakeDuplex): Record<string, unknown>[] {
   return fake.writes.map((w) => JSON.parse(w)).filter((f) => f.ask).map((f) => f.ask);
 }
+function askDones(fake: FakeDuplex): Record<string, unknown>[] {
+  return fake.writes.map((w) => JSON.parse(w)).filter((f) => f.askDone).map((f) => f.askDone);
+}
 
 // Guards (T2.5): permissions:ui_prompt is mirrored to the phone as an { ask }
 // while connected, derived from the event's surface/value + request facts.
@@ -445,6 +448,49 @@ test("an inbound phone answer calls answerer.answer(requestId, value)", async ()
   fake.push('{"answer":{"requestId":"r1","value":"allow"}}\n');
   await tick();
   assert.deepEqual(answerer.answers.calls, [["r1", "allow"]]);
+});
+
+// Guards (T2.6): a decision through the answerer seam closes the card by phone.
+test("permissions:decision by the pi-hail answerer closes the ask by phone", async () => {
+  const { fireBus, fake } = await startWithAnswerer();
+  fireBus("permissions:ui_prompt", { requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } });
+  await tick();
+  fireBus("permissions:decision", {
+    requestId: "r1",
+    result: "allow",
+    decidedBy: { kind: "answerer", name: "pi-hail" },
+  });
+  await tick();
+  assert.deepEqual(askDones(fake).at(-1), { requestId: "r1", outcome: "allowed", by: "phone" });
+});
+
+// Guards (T2.6): any other decider closes the card by mac, and outcome maps
+// result allow\u2192allowed / deny\u2192denied; the requestId is then forgotten.
+test("permissions:decision by any other decider closes the ask by mac, then forgets it", async () => {
+  const { fireBus, fake } = await startWithAnswerer();
+  fireBus("permissions:ui_prompt", { requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } });
+  await tick();
+  fireBus("permissions:decision", {
+    requestId: "r1",
+    result: "deny",
+    decidedBy: { kind: "user", via: "dialog" },
+  });
+  await tick();
+  assert.deepEqual(askDones(fake).at(-1), { requestId: "r1", outcome: "denied", by: "mac" });
+  // Forgotten: a second decision for the same requestId sends nothing more.
+  const before = fake.writes.length;
+  fireBus("permissions:decision", { requestId: "r1", result: "allow", decidedBy: { kind: "yolo", pattern: null } });
+  await tick();
+  assert.equal(fake.writes.length, before, "an announced ask closes only once");
+});
+
+// Guards (T2.6): a decision for a requestId pi-hail never announced is ignored.
+test("permissions:decision for an unannounced requestId sends nothing", async () => {
+  const { fireBus, fake } = await startWithAnswerer();
+  const before = fake.writes.length;
+  fireBus("permissions:decision", { requestId: "never", result: "allow", decidedBy: { kind: "user", via: "dialog" } });
+  await tick();
+  assert.equal(fake.writes.length, before);
 });
 
 // Guards: pi quit emits an exit frame with the code.
