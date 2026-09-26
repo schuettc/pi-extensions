@@ -376,6 +376,77 @@ test("no permission system: quiet, no warning", async () => {
   assert.equal(errors.length, 0, "no console warning when there is no permission system");
 });
 
+// \u2500\u2500 T2.5/T2.6: mirror ui_prompt \u2192 ask, answer, and close on decision \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+/** Wire up an owning session with the fork's seam registered and connected. */
+async function startWithAnswerer() {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  const answerer = makeAnswerer();
+  const service = { registerPromptAnswerer: () => answerer };
+  createExtension(pi, {
+    connect: async () => fake,
+    getPermissionsService: () => service as never,
+  });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fake.push('{"connection":"connected"}\n');
+  await tick();
+  fireBus("permissions:ready", { sessionId: "S" });
+  await tick();
+  return { pi, fire, fireBus, fake, answerer };
+}
+
+function asks(fake: FakeDuplex): Record<string, unknown>[] {
+  return fake.writes.map((w) => JSON.parse(w)).filter((f) => f.ask).map((f) => f.ask);
+}
+
+// Guards (T2.5): permissions:ui_prompt is mirrored to the phone as an { ask }
+// while connected, derived from the event's surface/value + request facts.
+test("permissions:ui_prompt is mirrored as an { ask } when connected", async () => {
+  const { fireBus, fake } = await startWithAnswerer();
+  fireBus("permissions:ui_prompt", {
+    requestId: "r1",
+    surface: "bash",
+    value: "rm -rf x",
+    request: { surface: "bash", toolName: "bash", value: "rm -rf x" },
+  });
+  await tick();
+  assert.deepEqual(asks(fake), [
+    { requestId: "r1", title: "Allow bash?", message: "rm -rf x", toolName: "bash", surface: "bash", value: "rm -rf x" },
+  ]);
+});
+
+// Guards (T2.5): with no affirmed connection, ui_prompt produces no ask frame.
+test("permissions:ui_prompt sends no ask while the session is not connected", async () => {
+  const { pi, fire, fireBus } = makeFakePi();
+  const fake = new FakeDuplex();
+  const answerer = makeAnswerer();
+  const service = { registerPromptAnswerer: () => answerer };
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => service as never });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fireBus("permissions:ready", { sessionId: "S" }); // registered but NOT connected
+  await tick();
+  fireBus("permissions:ui_prompt", { requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } });
+  await tick();
+  assert.equal(asks(fake).length, 0, "no ask frame while disconnected");
+});
+
+// Guards (T2.5): a phone answer is routed to the registered answerer's answer().
+test("an inbound phone answer calls answerer.answer(requestId, value)", async () => {
+  const { fake, answerer } = await startWithAnswerer();
+  fake.push('{"answer":{"requestId":"r1","value":"allow"}}\n');
+  await tick();
+  assert.deepEqual(answerer.answers.calls, [["r1", "allow"]]);
+});
+
 // Guards: pi quit emits an exit frame with the code.
 test("session_shutdown reason 'quit' emits { exit }", async () => {
   const { pi, fire } = makeFakePi();

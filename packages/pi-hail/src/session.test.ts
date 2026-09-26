@@ -141,6 +141,103 @@ test("version_mismatch reply renders one notice and makes the session inert", ()
   assert.equal(deps.send.calls.length, 0);
 });
 
+// \u2500\u2500 T2.5: mirror permissions:ui_prompt \u2192 { ask }, and route phone answers \u2500\u2500\u2500\u2500
+
+/** The last `{ ask }` frame's payload, or undefined. */
+function lastAsk(deps: ReturnType<typeof fakeDeps>): Record<string, unknown> | undefined {
+  const asks = deps.send.calls.map((c) => c[0] as Record<string, unknown>).filter((f) => f.ask);
+  return asks.length ? (asks[asks.length - 1].ask as Record<string, unknown>) : undefined;
+}
+
+/** A Session the daemon has affirmed is connected to phones. */
+function connectedSession(deps: ReturnType<typeof fakeDeps>): Session {
+  const s = new Session(deps);
+  s.onInbound({ connection: "connected" });
+  return s;
+}
+
+// Guards: a fresh (unaffirmed) session never announces an ask \u2014 there is nowhere
+// to show it, so the permission system's own Mac dialog is the only surface.
+test("announceAsk is a no-op until the daemon affirms the session connected", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.announceAsk({ requestId: "r1", surface: "bash", value: "rm x", request: { toolName: "bash" } });
+  assert.equal(lastAsk(deps), undefined);
+});
+
+// Guards: once connected, ui_prompt is mirrored as an { ask } derived from the
+// event's surface/value and its request facts \u2014 the card reads "Allow bash?".
+test("announceAsk sends an { ask } derived from the ui_prompt facts when connected", () => {
+  const deps = fakeDeps();
+  const s = connectedSession(deps);
+  s.announceAsk({
+    requestId: "r1",
+    surface: "bash",
+    value: "rm -rf x",
+    request: { surface: "bash", toolName: "bash", value: "rm -rf x" },
+  });
+  assert.deepEqual(lastAsk(deps), {
+    requestId: "r1",
+    title: "Allow bash?",
+    message: "rm -rf x",
+    toolName: "bash",
+    surface: "bash",
+    value: "rm -rf x",
+  });
+});
+
+// Guards: title falls back to the surface (then "this") when no toolName; message
+// and value derive from the request facts when the top-level value is absent.
+test("announceAsk falls back to surface for the title and request.value for the message", () => {
+  const deps = fakeDeps();
+  const s = connectedSession(deps);
+  s.announceAsk({
+    requestId: "r2",
+    surface: "external_directory",
+    value: null,
+    request: { surface: "external_directory", toolName: null, value: "/etc/hosts" },
+  });
+  assert.deepEqual(lastAsk(deps), {
+    requestId: "r2",
+    title: "Allow external_directory?",
+    message: "/etc/hosts",
+    surface: "external_directory",
+    value: "/etc/hosts",
+  });
+});
+
+// Guards: each requestId is announced at most once (no duplicate ask frames).
+test("announceAsk announces a requestId at most once", () => {
+  const deps = fakeDeps();
+  const s = connectedSession(deps);
+  const ev = { requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } };
+  s.announceAsk(ev);
+  s.announceAsk(ev);
+  const asks = deps.send.calls.map((c) => c[0] as Record<string, unknown>).filter((f) => f.ask);
+  assert.equal(asks.length, 1);
+});
+
+// Guards: a phone answer is routed to the permission system's prompt-answerer
+// seam (deps.answerPrompt); pi-hail draws no dialog and settles nothing itself.
+test("an inbound phone answer calls answerPrompt with the verdict", () => {
+  const deps = fakeDeps();
+  const s = connectedSession(deps);
+  s.onInbound({ answer: { requestId: "r1", value: "allow" } });
+  s.onInbound({ answer: { requestId: "r2", value: "deny" } });
+  assert.deepEqual(deps.answerPrompt.calls, [
+    ["r1", "allow"],
+    ["r2", "deny"],
+  ]);
+});
+
+// Guards: an unknown verdict is ignored \u2014 never an implicit allow.
+test("an inbound answer with an unknown value is ignored", () => {
+  const deps = fakeDeps();
+  const s = connectedSession(deps);
+  s.onInbound({ answer: { requestId: "r1", value: "maybe" } });
+  assert.equal(deps.answerPrompt.calls.length, 0);
+});
+
 // Guards: a presence frame updates the status line.
 test("onInbound presence sets the status text", () => {
   const deps = fakeDeps();
