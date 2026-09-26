@@ -66,7 +66,7 @@ export type Outbound =
   | {
       askDone: {
         requestId: string;
-        outcome: "allowed" | "denied" | "deferred";
+        outcome: "allowed" | "denied";
         by: "mac" | "phone";
       };
     };

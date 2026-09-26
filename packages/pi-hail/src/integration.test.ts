@@ -160,7 +160,7 @@ test(
           value: "echo hi",
         },
       });
-      socket.send({ askDone: { requestId: "it-ask-1", outcome: "deferred", by: "mac" } });
+      socket.send({ askDone: { requestId: "it-ask-1", outcome: "denied", by: "mac" } });
       socket.send({ turn: "end" });
       await new Promise((r) => setTimeout(r, 300));
 
