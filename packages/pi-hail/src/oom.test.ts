@@ -127,7 +127,7 @@ test("a 150 KB / 3000-event streamed turn against a slow reader stays bounded (m
     canSendProgress: () => socket.canSendProgress(),
     onDrain: (cb) => socket.onDrain(cb),
     sendUserMessage: () => {},
-    ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {}, openDialog: () => new Promise(() => {}) },
+    ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {} },
     getEntries: () => [],
     now: () => nowMs,
     setTimer: (cb, ms): TimerHandle => {

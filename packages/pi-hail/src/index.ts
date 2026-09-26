@@ -9,11 +9,10 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
-import type { PermissionsService } from "@gotgenes/pi-permission-system";
+import type { PermissionsService, PromptAnswerer } from "@gotgenes/pi-permission-system";
 import { DaemonSocket, realConnect, type Connect } from "./socket.ts";
-import { Session, type RegisterInput, type SessionDeps } from "./session.ts";
+import { Session, type RegisterInput, type SessionDeps, type UiPromptFacts } from "./session.ts";
 import { deriveIdentity, type TmuxFacts } from "./identity.ts";
-import { createPhoneAuthorizer } from "./authorizer.ts";
 import { runHailCommand } from "./command.ts";
 
 /** DI surface for tests: a fake socket, a fake permission service, an injected clock/timeout. */
@@ -154,8 +153,18 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   // The input handler reads this flag; the Session sets it via ui.holdInput
   // while a phone turn runs, so local terminal input is held (not dropped).
   let heldFlag = false;
-  let authorizerDispose: (() => void) | undefined;
-  let warnedNoPerms = false;
+  // The prompt-answerer capability registered on permissions:ready, its
+  // disposer, and a once-per-process guard for the missing-seam warning. The
+  // phone answers a showing prompt through `answerer.answer`; `answerer` is
+  // undefined until (and unless) the fork's seam is present.
+  let answerer: PromptAnswerer | undefined;
+  let answererDispose: (() => void) | undefined;
+  let answererRegistered = false;
+  let warnedMissingSeam = false;
+  // pi's UI notify for this pane, captured at session_start so the
+  // permissions:ready bus handler (which gets no ctx) can surface the
+  // missing-seam warning through pi's UI.
+  let uiNotify: ((msg: string, level: "info" | "warning" | "error") => void) | undefined;
 
   // Register (and, on a reconnect, replay). Both the first call and every
   // reconnect must swallow a rejected promise: a dead daemon rejects, and pi
@@ -180,13 +189,10 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         ui: {
           setStatus: (key: string, text: string | undefined) => void;
           notify: (msg: string, level: "info" | "warning" | "error") => void;
-          select: (
-            title: string,
-            options: string[],
-            opts?: { signal?: AbortSignal },
-          ) => Promise<string | undefined>;
         };
       };
+
+      uiNotify = (msg, level) => c.ui.notify(msg, level);
 
       // pi's in-memory entry list is the cursor unit (streaming spec \u00a74.1/\u00a74.3);
       // never the lazily-written session file. Bound so handlers outside this
@@ -228,9 +234,13 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
           holdInput: (held) => {
             heldFlag = held;
           },
-          // The Mac side of an ask: a select dialog we can dismiss the moment
-          // the phone answers first (spec \u00a7A). Never throws into the Session.
-          openDialog: (title, options, signal) => c.ui.select(title, options, { signal }),
+        },
+        // The phone answers the permission system's OWN showing prompt through
+        // the prompt-answerer seam (spec \u00a7B). Closes over `answerer`, which is
+        // set on permissions:ready only when the fork's seam is present; absent,
+        // a phone answer is inert (the Mac dialog stays the only surface).
+        answerPrompt: (requestId, verdict) => {
+          answerer?.answer(requestId, verdict);
         },
         getEntries,
       };
@@ -317,27 +327,35 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       // session_start re-registers — do nothing (mirror pi-tmux-bridge).
       const reason = (event as { reason?: string } | null)?.reason;
       if (reason && reason !== "quit") return;
-      if (authorizerDispose) {
+      if (answererDispose) {
         try {
-          authorizerDispose();
+          answererDispose();
         } catch {
           // best-effort
         }
-        authorizerDispose = undefined;
+        answererDispose = undefined;
       }
+      answerer = undefined;
+      answererRegistered = false;
       session?.exit(0);
       socket?.close();
     }),
   );
 
-  // Permissions: register the phone-answering authorizer link on
-  // permissions:ready (robust to load order / survives /reload). Gated on
-  // ownership. If the permission system is unavailable (older pi), skip
-  // registration, log once, and continue — phone answers degrade gracefully.
+  // Permissions: on permissions:ready (robust to load order / survives /reload,
+  // gated on ownership), resolve this session's service and register the phone
+  // prompt-answerer through the fork's seam. The requirement is enforced at
+  // runtime, visibly — never a silent no-op (spec E.3):
+  //   - service present AND registerPromptAnswerer is a function → register;
+  //   - service present but NO registerPromptAnswerer (plain @gotgenes upstream,
+  //     or an older fork build) → warn ONCE per process through pi's UI + the
+  //     console, and keep phone approvals disabled (no asks, no answers);
+  //   - no permission system at all (import fails / service undefined) → quiet,
+  //     approvals simply absent, as before.
   pi.events?.on?.("permissions:ready", (data: unknown) =>
     safe(async () => {
       if (!ownsThisPane || !session) return;
-      const currentSession = session;
+      if (answererRegistered) return; // idempotent across repeat readies
       const sessionId = (data as { sessionId?: string | null } | null)?.sessionId;
       if (!sessionId) return;
       let service: PermissionsService | undefined;
@@ -348,30 +366,60 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       } catch {
         service = undefined;
       }
-      if (!service) {
-        if (!warnedNoPerms) {
-          warnedNoPerms = true;
-          console.error(
-            "[pi-hail] permission system unavailable; phone cannot answer gates (answer on your Mac)",
-          );
+      // No permission system installed at all: pi has no permission prompts, so
+      // there is nothing to show or answer. Stay quiet.
+      if (!service) return;
+      // Service present but the fork's seam is missing: the requirement is not
+      // met. Warn once, visibly, and leave approvals disabled.
+      if (typeof service.registerPromptAnswerer !== "function") {
+        if (!warnedMissingSeam) {
+          warnedMissingSeam = true;
+          const msg = "hail: phone approvals need @schuettc/pi-permission-system";
+          try {
+            uiNotify?.(msg, "warning");
+          } catch {
+            // best-effort
+          }
+          console.error(msg);
         }
         return;
       }
-      const authorizer = createPhoneAuthorizer({ session: currentSession });
-      authorizerDispose = service.registerAuthorizer("pi-hail", authorizer.authorize);
+      answerer = service.registerPromptAnswerer("pi-hail");
+      answererDispose = answerer.dispose.bind(answerer);
+      answererRegistered = true;
     }),
   );
 
-  // Close a deferred ask when the permission system's own dialog decides it
-  // (permissions:decision). pi-hail no longer forwards permissions:ui_prompt:
-  // the daemon renders the ask from pi-hail's { ask } frame instead, so that
-  // announcement would only produce a blank phantom card.
+  // Mirror the permission system's OWN prompt to the phone (spec §B). On
+  // permissions:ui_prompt the Session sends an { ask } frame — but only while
+  // the daemon has affirmed this session is connected to phones, and only once
+  // per requestId (tracked in the Session's announced set). pi-hail draws no
+  // dialog: the permission system owns the single Mac dialog.
+  pi.events?.on?.("permissions:ui_prompt", (data: unknown) =>
+    safe(() => {
+      if (!ownsThisPane || !session) return;
+      const d = data as UiPromptFacts | null;
+      if (!d?.requestId) return;
+      session.announceAsk(d);
+    }),
+  );
+
+  // Close an announced ask when the permission system's own dialog decides it
+  // (permissions:decision) → { askDone }. `by` is `phone` when the decision came
+  // through the prompt-answerer seam (decidedBy.kind === "answerer" && name ===
+  // "pi-hail"), else `mac` (dialog, auto-confirm, rule, yolo, …).
   pi.events?.on?.("permissions:decision", (data: unknown) =>
     safe(() => {
       if (!ownsThisPane || !session) return;
-      const d = data as { requestId?: string; result?: string } | null;
+      const d = data as {
+        requestId?: string;
+        result?: string;
+        decidedBy?: { kind?: string; name?: string } | null;
+      } | null;
       if (!d?.requestId || (d.result !== "allow" && d.result !== "deny")) return;
-      session.onDecision(d.requestId, d.result);
+      const by =
+        d.decidedBy?.kind === "answerer" && d.decidedBy?.name === "pi-hail" ? "phone" : "mac";
+      session.onDecision(d.requestId, d.result, by);
     }),
   );
 }
