@@ -480,8 +480,8 @@ export class Session {
       return;
     }
     if ("resend" in m) {
-      const since = (m.resend as { since?: number }).since ?? 0;
-      this.onResend(since);
+      const resend = m.resend as { since?: number; limit?: number };
+      this.onResend(resend.since ?? 0, resend.limit ?? 0);
       return;
     }
     if ("answer" in m) {

@@ -622,6 +622,22 @@ test("resend replays message entries after since with cursor since+i+1 then done
   ]);
 });
 
+// T1.3 \u2014 onInbound reads `limit` off the resend frame and passes it through.
+test("onInbound resend passes since and limit to onResend", () => {
+  const r = recDeps();
+  const s = new Session(r.deps);
+  const calls: Array<[number, number | undefined]> = [];
+  s.onResend = (since: number, limit?: number) => {
+    calls.push([since, limit]);
+  };
+  s.onInbound({ resend: { since: 5, limit: 2 } });
+  s.onInbound({ resend: { since: 5 } });
+  assert.deepEqual(calls, [
+    [5, 2],
+    [5, 0],
+  ]);
+});
+
 // T1.2 \u2014 onResend(since, limit): limit 0 (or absent) is uncapped \u2014 all frames
 // after `since`, no marker, then done (today's behavior).
 test("onResend with limit 0 replays every frame after since with no marker", () => {
