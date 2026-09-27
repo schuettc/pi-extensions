@@ -57,6 +57,19 @@ export function record(bin: string, command: string, cwd: string, sessionId: str
   }
 }
 
+/** Tell casebook serve this session's turn ended (`casebook settled`), so page
+ * messages queued behind the turn go out. Fire-and-forget. */
+export function settled(bin: string, sessionId: string): void {
+  if (!sessionId) return;
+  try {
+    const child = spawn(bin, ["settled", "--session", sessionId], { stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    // never fail the session
+  }
+}
+
 /** Start `casebook sync --no-github` detached. */
 export function syncInBackground(bin: string): void {
   try {

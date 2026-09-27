@@ -7,6 +7,7 @@ A [pi coding agent](https://github.com/earendil-works/pi-coding-agent) extension
 - **Journals git/gh bash calls** with the pi session id — bash tool calls that invoke `git` or `gh` are sent to `casebook record --harness pi`; casebook stores verbs and targets, never the full command line.
 - **Briefs the first turn** — the first agent turn of each session gets the repo briefing (`casebook brief`) as a hidden context message, so the agent knows the state of your repo without you having to ask.
 - **Syncs in the background** — `casebook sync --no-github` runs at session start and shutdown; the 30-minute launchd job installed by kempt handles the GitHub refresh.
+- **Reports settled turns** — when the agent settles, it runs `casebook settled --session <id>`, so page messages queued behind the turn go out (casebook >= 0.2.0; older casebook ignores it).
 
 ## Requirements
 

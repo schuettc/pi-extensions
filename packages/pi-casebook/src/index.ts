@@ -8,11 +8,13 @@
  *    hidden context message.
  *  - session start and shutdown run `casebook sync --no-github` in the
  *    background; the 30-minute launchd job does the GitHub refresh.
+ *  - when the agent settles (its turn ends), `casebook settled` tells casebook
+ *    serve, so page messages that queued behind the turn go out.
  *
  * Inert when the casebook binary is missing. Never blocks, throws or prints.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { brief, installed, casebookBin, mentionsGit, record, syncInBackground } from "./casebook.ts";
+import { brief, installed, casebookBin, mentionsGit, record, settled, syncInBackground } from "./casebook.ts";
 
 export default function casebook(pi: ExtensionAPI) {
   const bin = casebookBin();
@@ -41,6 +43,8 @@ export default function casebook(pi: ExtensionAPI) {
     if (!text) return undefined;
     return { message: { customType: "casebook-brief", content: text, display: false } };
   });
+
+  pi.on("agent_settled", () => settled(bin, sessionId));
 
   pi.on("session_shutdown", () => syncInBackground(bin));
 }

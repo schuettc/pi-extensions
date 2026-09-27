@@ -60,3 +60,14 @@ test("briefs the first turn only, hidden from the transcript", async () => {
   assert.equal(await handlers.before_agent_start({ type: "before_agent_start", prompt: "again", systemPrompt: "" }), undefined);
   assert.ok(existsSync(f.bin));
 });
+
+test("reports settled turns with the pi session", async () => {
+  const f = fakeCasebook();
+  process.env.CASEBOOK_BIN = f.bin;
+  const { pi, handlers } = fakePi();
+  casebook(pi as any);
+  await handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+  await handlers.agent_settled({ type: "agent_settled" });
+  await wait(300);
+  assert.match(readFileSync(f.log, "utf8"), /ARGS settled --session pi-7/);
+});
