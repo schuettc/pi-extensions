@@ -1,21 +1,21 @@
 /**
- * pi-docket: connects a pi session to docket (tackle.tools).
+ * pi-casebook: connects a pi session to casebook (tackle.tools).
  *
  *  - bash tool calls that invoke git or gh are journaled with this pi session
- *    (`docket record --harness pi`); docket keeps verbs and targets, never the
+ *    (`casebook record --harness pi`); casebook keeps verbs and targets, never the
  *    command line.
- *  - the first turn of a session gets the repo briefing (`docket brief`) as a
+ *  - the first turn of a session gets the repo briefing (`casebook brief`) as a
  *    hidden context message.
- *  - session start and shutdown run `docket sync --no-github` in the
+ *  - session start and shutdown run `casebook sync --no-github` in the
  *    background; the 30-minute launchd job does the GitHub refresh.
  *
- * Inert when the docket binary is missing. Never blocks, throws or prints.
+ * Inert when the casebook binary is missing. Never blocks, throws or prints.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { brief, installed, docketBin, mentionsGit, record, syncInBackground } from "./docket.ts";
+import { brief, installed, casebookBin, mentionsGit, record, syncInBackground } from "./casebook.ts";
 
-export default function docket(pi: ExtensionAPI) {
-  const bin = docketBin();
+export default function casebook(pi: ExtensionAPI) {
+  const bin = casebookBin();
   if (!installed(bin)) return;
   let cwd = process.cwd();
   let sessionId = "";
@@ -39,7 +39,7 @@ export default function docket(pi: ExtensionAPI) {
     briefed = true;
     const text = (await brief(bin, cwd)).trim();
     if (!text) return undefined;
-    return { message: { customType: "docket-brief", content: text, display: false } };
+    return { message: { customType: "casebook-brief", content: text, display: false } };
   });
 
   pi.on("session_shutdown", () => syncInBackground(bin));
