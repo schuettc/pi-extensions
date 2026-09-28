@@ -13,6 +13,9 @@ nothing listens on a network.
 
 Site: [channels.tools](https://channels.tools)
 
+
+**One-shot runs.** In pi's `print` and `json` modes (`pi -p`, `pi --mode json`) a channel event is logged, not delivered: a wake would start a turn beside the run's single prompt, and pi would refuse that prompt ("Agent is already processing a prompt"). The channels' tools stay available. Interactive (`tui`) and `rpc` sessions wake as usual.
+
 ## Install
 
 ```bash

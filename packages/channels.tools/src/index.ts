@@ -43,8 +43,19 @@ export function createExtension(pi: any, deps: Deps = {}): void {
     ...(deps.retryMaxMs !== undefined ? { retryMaxMs: deps.retryMaxMs } : {}),
   });
 
+  // A one-shot run (pi's "print" and "json" modes: `pi -p`, `pi --mode json`)
+  // answers exactly one prompt and exits. A wake there would start a turn of
+  // its own, and pi then refuses the run's prompt ("Agent is already
+  // processing a prompt"), so events are logged, never delivered. The
+  // channel's tools stay registered. Set from session_start's ctx.mode.
+  let oneShot = false;
+
   const wake = createWake({
     deliver: ({ envelope, summary }) => {
+      if (oneShot) {
+        log(`one-shot run: not delivering a channel event as a turn (${summary})`);
+        return;
+      }
       // Two-part delivery so the transcript shows a short readable line
       // instead of the raw XML envelope, while the model still receives the
       // envelope verbatim (pi serializes custom messages to the LLM as user
@@ -196,6 +207,7 @@ export function createExtension(pi: any, deps: Deps = {}): void {
 
   pi.on("session_start", async (_event: unknown, ctx: any) => {
     ui = ctx.ui;
+    oneShot = ctx.mode === "print" || ctx.mode === "json";
     wake.onSessionStart();
 
     // The whole body runs under try/finally so wake.onReady() always fires,
