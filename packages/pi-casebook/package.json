@@ -1,6 +1,6 @@
 {
   "name": "pi-casebook",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "casebook for the pi coding agent: journal git/gh bash calls with the pi session, brief the session on its repo, sync in the background.",
   "type": "module",
   "license": "MIT",
