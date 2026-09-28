@@ -12,7 +12,7 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 
 type ToolDef = { name: string; execute(id: string, params: unknown): Promise<unknown> };
 
-function fakePi(sessionId = "session-xyz") {
+function fakePi(sessionId = "session-xyz", mode = "tui") {
   const handlers = new Map<string, Handler[]>();
   const sent: Array<{ msg: unknown; opts: unknown }> = [];
   const customs: Array<{ msg: unknown; opts: unknown }> = [];
@@ -41,7 +41,8 @@ function fakePi(sessionId = "session-xyz") {
   const ctx = {
     sessionManager: { getSessionId: () => sessionId },
     ui: { setStatus: (_k: string, v?: string) => { statuses.push(v ?? ""); } },
-    hasUI: true,
+    hasUI: mode === "tui" || mode === "rpc",
+    mode,
     cwd: process.cwd(),
   };
   async function fire(event: string, payload: unknown = {}): Promise<unknown[]> {
@@ -130,6 +131,39 @@ test("an inbound event delivers a hidden envelope plus a visible summary line", 
   assert.equal(opts.deliverAs, "steer");
   const text = sent[0].msg as string;
   assert.doesNotMatch(text, /<channel/);
+  await fire("session_shutdown");
+});
+
+// A one-shot run (`pi -p`, `pi --mode json`) answers exactly one prompt and
+// exits. A channel wake there starts a turn of its own, and pi then refuses
+// the run's prompt with "Agent is already processing a prompt": a pi -p
+// started in a tmux pane whose muster alias had unread mail failed every time.
+// In those modes an event is not delivered as a turn; the tools stay usable.
+for (const mode of ["print", "json"]) {
+  test(`in ${mode} mode an inbound event starts no turn, and tools still register`, async () => {
+    const { pi, fire, sent, customs, registered } = fakePi("session-xyz", mode);
+    createExtension(pi as never, {
+      env: {},
+      loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_PUSH_AFTER_MS: "50" } } }),
+    });
+    await fire("session_start", { reason: "startup" });
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(sent.length, 0, "no user message: it would start a turn beside the run's own prompt");
+    assert.equal(customs.length, 0, "no envelope: it would ride into the run's one prompt");
+    assert.ok(registered.includes("fake_status"), "the channel's tools are still available");
+    await fire("session_shutdown");
+  });
+}
+
+test("in rpc mode an inbound event still wakes the session", async () => {
+  const { pi, fire, sent } = fakePi("session-xyz", "rpc");
+  createExtension(pi as never, {
+    env: {},
+    loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_PUSH_AFTER_MS: "50" } } }),
+  });
+  await fire("session_start", { reason: "startup" });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(sent.length, 1);
   await fire("session_shutdown");
 });
 
