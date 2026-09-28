@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import casebook from "./index.ts";
+import { renderBatch, type ChannelEvent } from "../../channels.tools/src/envelope.ts";
 
 function fakeCasebook(): { bin: string; log: string } {
   const dir = mkdtempSync(join(tmpdir(), "pi-casebook-"));
@@ -70,4 +71,98 @@ test("reports settled turns with the pi session", async () => {
   await handlers.agent_settled({ type: "agent_settled" });
   await wait(300);
   assert.match(readFileSync(f.log, "utf8"), /ARGS settled --session pi-7/);
+});
+
+// Helper: build a context event with custom messages each containing one casebook envelope
+function casebookContextEvent(deliveryMetas: Array<Record<string, string>>): { type: "context"; messages: unknown[] } {
+  const messages = deliveryMetas.map((meta) => {
+    const event: ChannelEvent = { source: "casebook", content: `page from casebook delivery ${meta.delivery}`, meta };
+    return { role: "custom", customType: "channel-envelope", content: renderBatch("casebook", [event]), display: false, timestamp: Date.now() };
+  });
+  return { type: "context", messages };
+}
+
+test("(a) context with casebook deliveries 7 and 9 → settled --shown 7,9", async () => {
+  const f = fakeCasebook();
+  process.env.CASEBOOK_BIN = f.bin;
+  const { pi, handlers } = fakePi();
+  casebook(pi as any);
+  await handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+  // Fire context event containing envelopes for deliveries 7 and 9
+  const ctxEvent = casebookContextEvent([
+    { source: "casebook", delivery: "7", messages: "10,11" },
+    { source: "casebook", delivery: "9", messages: "12,13" },
+  ]);
+  await handlers.context(ctxEvent);
+  await handlers.agent_settled({ type: "agent_settled" });
+  await wait(300);
+  const log = readFileSync(f.log, "utf8");
+  assert.match(log, /ARGS settled --session pi-7 --shown 7,9/);
+});
+
+test("(b) non-casebook envelope (source galley) is ignored", async () => {
+  const f = fakeCasebook();
+  process.env.CASEBOOK_BIN = f.bin;
+  const { pi, handlers } = fakePi();
+  casebook(pi as any);
+  await handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+  const galleyEvent: ChannelEvent = { source: "galley", content: "some galley message", meta: { delivery: "5" } };
+  const envelope = renderBatch("galley", [galleyEvent]);
+  await handlers.context({
+    type: "context",
+    messages: [{ role: "custom", customType: "channel-envelope", content: envelope, display: false, timestamp: Date.now() }],
+  });
+  await handlers.agent_settled({ type: "agent_settled" });
+  await wait(300);
+  const log = readFileSync(f.log, "utf8");
+  // --shown must NOT appear
+  assert.doesNotMatch(log, /--shown/);
+  assert.match(log, /ARGS settled --session pi-7/);
+});
+
+test("(c) set clears: second agent_settled with no new context logs plain settled", async () => {
+  const f = fakeCasebook();
+  process.env.CASEBOOK_BIN = f.bin;
+  const { pi, handlers } = fakePi();
+  casebook(pi as any);
+  await handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+  // First run: context with delivery 7
+  await handlers.context(casebookContextEvent([{ source: "casebook", delivery: "7", messages: "10,11" }]));
+  await handlers.agent_settled({ type: "agent_settled" });
+  await wait(300);
+  // Second run: no new context, settled should have no --shown
+  await handlers.agent_settled({ type: "agent_settled" });
+  await wait(300);
+  const log = readFileSync(f.log, "utf8");
+  const lines = log.trim().split("\n").filter((l) => l.startsWith("ARGS settled"));
+  assert.equal(lines.length, 2, `expected 2 settled lines, got: ${log}`);
+  assert.match(lines[0], /--shown 7/);
+  assert.doesNotMatch(lines[1], /--shown/);
+});
+
+test("(d) malformed message shape does not throw", async () => {
+  const f = fakeCasebook();
+  process.env.CASEBOOK_BIN = f.bin;
+  const { pi, handlers } = fakePi();
+  casebook(pi as any);
+  await handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+  // Throw various malformed shapes at the context handler
+  const result = await handlers.context({
+    type: "context",
+    messages: [
+      null,
+      undefined,
+      42,
+      { role: "user", content: null },
+      { role: "custom", content: [null, { type: "text", text: 42 }, { type: "image" }] },
+      { role: "custom", content: [{ type: "text", text: "<channel source=\"casebook\" delivery=\"99\">good</channel>" }] },
+    ],
+  });
+  // Must return undefined (not throw) and must not modify messages
+  assert.equal(result, undefined);
+  // delivery 99 from the valid text block should still be collected (good message is last)
+  await handlers.agent_settled({ type: "agent_settled" });
+  await wait(300);
+  const log = readFileSync(f.log, "utf8");
+  assert.match(log, /--shown 99/);
 });

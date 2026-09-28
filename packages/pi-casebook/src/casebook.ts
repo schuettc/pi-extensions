@@ -58,16 +58,39 @@ export function record(bin: string, command: string, cwd: string, sessionId: str
 }
 
 /** Tell casebook serve this session's turn ended (`casebook settled`), so page
- * messages queued behind the turn go out. Fire-and-forget. */
-export function settled(bin: string, sessionId: string): void {
+ * messages queued behind the turn go out. Fire-and-forget.
+ * Pass shownIds (sorted delivery numbers) to report which deliveries the agent
+ * was actually shown this run; omit to report without --shown. */
+export function settled(bin: string, sessionId: string, shownIds?: number[]): void {
   if (!sessionId) return;
   try {
-    const child = spawn(bin, ["settled", "--session", sessionId], { stdio: "ignore" });
+    const args = ["settled", "--session", sessionId];
+    if (shownIds && shownIds.length > 0) args.push("--shown", shownIds.join(","));
+    const child = spawn(bin, args, { stdio: "ignore" });
     child.on("error", () => {});
     child.unref();
   } catch {
     // never fail the session
   }
+}
+
+/**
+ * Extract casebook delivery IDs from text containing <channel ...> tags.
+ * Returns the numeric delivery values from tags with source="casebook".
+ * Never throws.
+ */
+export function extractCasebookDeliveries(text: string): number[] {
+  const result: number[] = [];
+  // Match opening channel tags (may span attributes across the tag)
+  const tagRe = /<channel\s[^>]*>/g;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(text)) !== null) {
+    const tag = m[0];
+    if (!tag.includes('source="casebook"')) continue;
+    const dm = /\bdelivery="(\d+)"/.exec(tag);
+    if (dm) result.push(Number(dm[1]));
+  }
+  return result;
 }
 
 /** Start `casebook sync --no-github` detached. */
