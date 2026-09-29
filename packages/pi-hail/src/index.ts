@@ -314,7 +314,20 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       socket = new DaemonSocket({
         connect,
         path: socketPath,
-        onLine: (msg) => safe(() => session?.onInbound(msg)),
+        onLine: (msg) =>
+          safe(() => {
+            // {"superseded":true} is terminal (spec B2): a genuine duplicate lost
+            // the slot. Close the socket permanently (no reconnect), go inert, and
+            // show a one-line notice if the context is still valid.
+            if (msg != null && typeof msg === "object" && (msg as { superseded?: unknown }).superseded === true) {
+              dispose({
+                notice:
+                  "hail: this pane is now controlled by a newer pi-hail instance; this one is inactive.",
+              });
+              return;
+            }
+            session?.onInbound(msg);
+          }, "onLine"),
         // A control-socket drop means the daemon is unreachable: fall back to
         // NOT connected so permission asks defer to pi's normal prompt until a
         // reconnect + re-register is re-affirmed by the daemon.

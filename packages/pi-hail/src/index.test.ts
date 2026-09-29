@@ -733,3 +733,40 @@ test("diag is rate-limited to 1 per second", async () => {
   boom();
   assert.equal(diags().length, 2, "a diag is allowed again after 1s");
 });
+
+// ── P4: superseded — a genuine duplicate loses deterministically (spec B2) ────
+
+// Guards (B2): { superseded:true } closes the socket permanently (no reconnect)
+// and makes the instance inert.
+test("{ superseded:true } closes the socket permanently and never reconnects", async () => {
+  const { fire, fake, connects } = await startInstance();
+  assert.equal(connects(), 1);
+  fake.push('{"superseded":true}\n');
+  await tick();
+  assert.equal(fake.ended, true, "the socket is closed on superseded");
+  // A later drop must NOT trigger a reconnect.
+  fake.emit("close");
+  await tick();
+  await tick();
+  assert.equal(connects(), 1, "a superseded instance never reconnects");
+  // Inert: further events forward nothing.
+  const before = fake.writes.length;
+  fire("turn_start", { type: "turn_start" }, makeCtx());
+  assert.equal(fake.writes.length, before, "a superseded instance is inert");
+});
+
+// Guards (B2): a one-line notice is shown when the context is still valid.
+test("{ superseded:true } shows a one-line notice", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  const { ctx, notify } = ctxWithNotify();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fake.push('{"superseded":true}\n');
+  await tick();
+  assert.equal(notify.calls.length, 1, "exactly one notice on superseded");
+});
