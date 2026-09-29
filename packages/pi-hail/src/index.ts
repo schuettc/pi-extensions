@@ -6,12 +6,19 @@
 // a missing/slow daemon never blocks a turn.
 
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import type { PermissionsService, PromptAnswerer } from "@gotgenes/pi-permission-system";
 import { DaemonSocket, realConnect, type Connect } from "./socket.ts";
-import { Session, type RegisterInput, type SessionDeps, type UiPromptFacts } from "./session.ts";
+import {
+  Session,
+  errorMessage,
+  type RegisterInput,
+  type SessionDeps,
+  type UiPromptFacts,
+} from "./session.ts";
 import { deriveIdentity, type TmuxFacts } from "./identity.ts";
 import { runHailCommand } from "./command.ts";
 
@@ -23,21 +30,10 @@ export interface ExtensionDeps {
   getTmuxSessionId?: () => string | undefined;
   /** Test seam: tmux facts for this pane (defaults to one `tmux display-message`). */
   getTmuxFacts?: () => TmuxFacts;
+  /** Test seam: clock for the diag rate-limiter (defaults to Date.now). */
+  now?: () => number;
 }
 
-// Every handler is best-effort: it sits directly on a pi lifecycle event, and a
-// harness that fails a session start, a turn, or a shutdown is worse than no
-// harness at all. NOTHING here may escape into pi.
-function safe(fn: () => void | Promise<void>): void {
-  try {
-    const result = fn();
-    if (result && typeof (result as Promise<void>).catch === "function") {
-      (result as Promise<void>).catch(() => {});
-    }
-  } catch {
-    // Best-effort: swallow.
-  }
-}
 
 // One `tmux display-message` for every fact, targeted at this pane when tmux
 // exported TMUX_PANE. A bare terminal (no $TMUX) reports inTmux:false. Guarded
@@ -143,10 +139,66 @@ const FORWARDED_EVENTS = [
 export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   const connect = deps.connect ?? realConnect;
   const socketPath = deps.socketPath;
+  const now = deps.now ?? (() => Date.now());
 
-  // Ownership is captured at the one session_start that owns the pane; a
-  // subagent node's stays false, so its events and bus registrations are inert.
+  // Diagnostics (spec D3'): report a swallowed error to the daemon as a { diag }
+  // frame, rate-limited to 1/s per instance and de-duplicated per message for
+  // 60 s. Never throws into pi, never prints to the TUI. A reentrancy guard keeps
+  // a diag send (which may itself fail) from spawning more diags.
+  let lastDiagAt = Number.NEGATIVE_INFINITY;
+  const diagSeen = new Map<string, number>();
+  let inDiag = false;
+  const reportDiag = (where: string, message: string): void => {
+    if (inDiag) return;
+    const t = now();
+    const seenUntil = diagSeen.get(message);
+    if (seenUntil !== undefined && seenUntil > t) return; // de-duplicated (60 s)
+    if (t - lastDiagAt < 1000) return; // rate-limited (1/s)
+    lastDiagAt = t;
+    // Prune expired entries so distinct messages can't grow the map without
+    // bound; with the 1/s limit it holds at most ~60 live entries.
+    for (const [m, until] of diagSeen) if (until <= t) diagSeen.delete(m);
+    diagSeen.set(message, t + 60_000);
+    inDiag = true;
+    try {
+      socket?.send({ diag: { where, message } });
+    } catch {
+      // best-effort: a diag must never throw into pi
+    } finally {
+      inDiag = false;
+    }
+  };
+
+  // Every handler is best-effort: it sits directly on a pi lifecycle event, and a
+  // harness that fails a session start, a turn, or a shutdown is worse than no
+  // harness at all. NOTHING here may escape into pi \u2014 a throw is reported through
+  // a { diag } frame (spec D3'), never printed to the TUI.
+  const safe = (fn: () => void | Promise<void>, where = "handler"): void => {
+    try {
+      const result = fn();
+      if (result && typeof (result as Promise<void>).catch === "function") {
+        (result as Promise<void>).catch((err) => reportDiag(where, errorMessage(err)));
+      }
+    } catch (err) {
+      reportDiag(where, errorMessage(err));
+    }
+  };
+
+  // Ownership is captured at the session_start that owns the pane; a subagent
+  // node's stays false, so its events and bus registrations are inert. With the
+  // A1 lifecycle each pi instance re-runs this factory, so one createExtension
+  // serves exactly one pi session: ownership is bound from THIS instance's own
+  // session_start (no "first start only" guard).
   let ownsThisPane = false;
+  // A random id for THIS pi-hail instance (spec A4), stable for its lifetime so
+  // the daemon can tell one instance from another across a slot's history.
+  const instanceId = randomUUID();
+  // Computes the pane's CURRENT in-memory cursor at each register call (spec A3);
+  // bound in session_start from the owning context's getEntries.
+  let computeCursor: (() => number) | undefined;
+  // Set once this instance has been disposed (session_shutdown for any reason,
+  // or {"superseded":true}). After dispose every handler is a no-op.
+  let disposed = false;
   let session: Session | undefined;
   let socket: DaemonSocket | undefined;
   let registerInput: RegisterInput | undefined;
@@ -170,7 +222,16 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   // reconnect must swallow a rejected promise: a dead daemon rejects, and pi
   // must still start / keep running with no unhandled rejection.
   const register = (): void => {
-    if (!socket || !session || !registerInput) return;
+    if (disposed || !socket || !session || !registerInput) return;
+    // The cursor is recomputed at EACH register (spec A3): a reconnect after a
+    // daemon outage must report where the pane IS now, not where it started.
+    if (computeCursor) {
+      try {
+        registerInput.cursor = computeCursor();
+      } catch (err) {
+        reportDiag("register.cursor", errorMessage(err));
+      }
+    }
     socket
       .register(session.buildRegisterArgs(registerInput))
       .then((reply) => safe(() => session?.onRegisterReply(reply)))
@@ -180,7 +241,8 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   pi.on("session_start", (_event: unknown, ctx: unknown) =>
     safe(() => {
       if (!ownsPane(ctx)) return;
-      if (ownsThisPane) return; // capture identity from the first owning start only
+      if (disposed) return; // a disposed instance never re-binds
+      if (ownsThisPane) return; // this instance already bound its one session
       ownsThisPane = true;
 
       const c = ctx as {
@@ -198,6 +260,10 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       // never the lazily-written session file. Bound so handlers outside this
       // closure (the forwarded-event loop) read the pane's current position.
       const getEntries = (): unknown[] => c.sessionManager.getEntries?.() ?? [];
+      computeCursor = () => getEntries().length;
+      // The pi session id (spec A4), always reported. Distinct from the slot
+      // identity below, which for a hail-identity pane is the @hail_session id.
+      const piSessionId = String(c.sessionManager.getSessionId());
       const facts = deps.getTmuxFacts ? deps.getTmuxFacts() : readTmuxFacts();
       // Back-compat test seam: an injected @hail_session id overrides the facts.
       if (deps.getTmuxSessionId) facts.hailSession = deps.getTmuxSessionId();
@@ -210,6 +276,8 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         work: id.work,
         dir,
         piVersion,
+        piSessionId,
+        instanceId,
         identity: id.identity,
         ...(facts.inTmux
           ? { tmux: { socket: facts.socketPath, session: facts.sessionName, pane: facts.paneId } }
@@ -249,7 +317,20 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       socket = new DaemonSocket({
         connect,
         path: socketPath,
-        onLine: (msg) => safe(() => session?.onInbound(msg)),
+        onLine: (msg) =>
+          safe(() => {
+            // {"superseded":true} is terminal (spec B2): a genuine duplicate lost
+            // the slot. Close the socket permanently (no reconnect), go inert, and
+            // show a one-line notice if the context is still valid.
+            if (msg != null && typeof msg === "object" && (msg as { superseded?: unknown }).superseded === true) {
+              dispose({
+                notice:
+                  "hail: this pane is now controlled by a newer pi-hail instance; this one is inactive.",
+              });
+              return;
+            }
+            session?.onInbound(msg);
+          }, "onLine"),
         // A control-socket drop means the daemon is unreachable: fall back to
         // NOT connected so permission asks defer to pi's normal prompt until a
         // reconnect + re-register is re-affirmed by the daemon.
@@ -257,6 +338,8 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         // The session knows the register args + replay cursor; re-register on
         // reconnect (which triggers replay after the daemon's `have` cursor).
         onReconnect: () => register(),
+        // Report the socket's swallowed errors through the same rate-limited path.
+        onDiag: (where, message) => reportDiag(where, message),
       });
       register();
     }),
@@ -298,7 +381,7 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         // The Session tags a persisted message_end with its cursor from the
         // in-memory entry list (spec \u00a74.3); everything else forwards verbatim.
         session.forwardEvent(event);
-      }),
+      }, `event:${name}`),
     );
   }
 
@@ -318,28 +401,47 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
     return { action: "continue" };
   });
 
+  // Dispose this instance's session-scoped resources (spec A1). Idempotent:
+  // reload, session replacement, superseded, and process exit converge here.
+  // `sendExit` (quit only) additionally sends an { exit } frame; a `notice`
+  // (superseded) surfaces a one-line message through pi's UI when the captured
+  // context is still valid. After this runs every handler is a no-op.
+  const dispose = (opts: { sendExit?: boolean; notice?: string } = {}): void => {
+    if (disposed) return;
+    disposed = true;
+    // A quit is a real end: tell the phone the session is gone BEFORE going inert.
+    if (opts.sendExit) safe(() => session?.exit(0), "dispose.exit");
+    // Settle announced asks (askDone) and go inert.
+    safe(() => session?.dispose(), "dispose.session");
+    if (answererDispose) {
+      try {
+        answererDispose();
+      } catch {
+        // best-effort
+      }
+      answererDispose = undefined;
+    }
+    answerer = undefined;
+    answererRegistered = false;
+    if (opts.notice) {
+      try {
+        uiNotify?.(opts.notice, "info");
+      } catch {
+        // The context may already be invalid; the notice is best-effort.
+      }
+    }
+    socket?.close();
+  };
+
   pi.on("session_shutdown", (event: unknown, ctx: unknown) =>
     safe(() => {
       if (!ownsThisPane || !ownsPane(ctx)) return;
       // Fires on every session SWITCH, not only quit: reason ∈
-      // quit|reload|new|resume|fork. Only a REAL end (quit) emits exit + closes
-      // the socket; every other reason is a continuation whose paired
-      // session_start re-registers — do nothing (mirror pi-tmux-bridge).
+      // quit|reload|new|resume|fork. EVERY reason disposes the instance so no
+      // stale DaemonSocket survives; only a REAL end (quit) also sends exit.
       const reason = (event as { reason?: string } | null)?.reason;
-      if (reason && reason !== "quit") return;
-      if (answererDispose) {
-        try {
-          answererDispose();
-        } catch {
-          // best-effort
-        }
-        answererDispose = undefined;
-      }
-      answerer = undefined;
-      answererRegistered = false;
-      session?.exit(0);
-      socket?.close();
-    }),
+      dispose({ sendExit: reason === "quit" });
+    }, "session_shutdown"),
   );
 
   // Permissions: on permissions:ready (robust to load order / survives /reload,

@@ -149,6 +149,70 @@ test("register frame reports cursor = getEntries().length", async () => {
   assert.equal(reg.args.cursor, 3);
 });
 
+// Guards (A4): every register frame carries piSessionId (the pi session id,
+// always) and instanceId (random per pi-hail instance).
+test("register frame carries piSessionId and instanceId", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  const reg = JSON.parse(fake.writes[0]);
+  assert.equal(reg.args.piSessionId, "S", "piSessionId is the pi session id");
+  assert.equal(typeof reg.args.instanceId, "string");
+  assert.ok(reg.args.instanceId.length > 0, "instanceId is a non-empty random id");
+});
+
+// Guards (A4): two instances get distinct instanceIds.
+test("each instance gets a distinct instanceId", async () => {
+  const idOf = async () => {
+    const { pi, fire } = makeFakePi();
+    const fake = new FakeDuplex();
+    createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+    fire("session_start", {}, makeCtx());
+    await tick();
+    await tick();
+    return JSON.parse(fake.writes[0]).args.instanceId as string;
+  };
+  assert.notEqual(await idOf(), await idOf());
+});
+
+// Guards (A3): the cursor is computed at EACH register call, so a reconnect
+// after work was done reports where the pane IS, not where it started.
+test("a re-register after reconnect sends the current cursor", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  const entries: unknown[] = [{ type: "message" }, { type: "message" }];
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire(
+    "session_start",
+    {},
+    makeCtx({
+      sessionManager: {
+        getSessionId: () => "S",
+        getSessionFile: () => undefined,
+        getEntries: () => entries,
+      },
+    }),
+  );
+  await tick();
+  await tick();
+  assert.equal(JSON.parse(fake.writes[0]).args.cursor, 2, "first register reports the current cursor");
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  // Work happened; the pane moved forward.
+  entries.push({ type: "message" }, { type: "message" });
+  // The daemon dropped: the socket reconnects and re-registers.
+  fake.emit("close");
+  await new Promise((r) => setTimeout(r, 700));
+  const regFrames = fake.writes
+    .map((w) => JSON.parse(w))
+    .filter((f) => f.cmd === "session.register");
+  assert.equal(regFrames.length, 2, "the socket re-registered after reconnect");
+  assert.equal(regFrames[1].args.cursor, 4, "the re-register reports the CURRENT cursor");
+});
+
 // Guards: a daemon-spawned pi must register under the Hail task id stamped on
 // its tmux window, not pi's independently generated native session id. The
 // daemon holds the phone's pending prompt under this exact id.
@@ -507,4 +571,202 @@ test("session_shutdown reason 'quit' emits { exit }", async () => {
   const frames = fake.writes.map((w) => JSON.parse(w));
   assert.ok(frames.some((f) => f.exit && f.exit.code === 0), "expected an { exit:{code:0} } frame");
   assert.equal(fake.ended, true);
+});
+
+// ── P1: lifecycle — every reason disposes the instance (spec A1/A2) ─────────
+
+/** Start an owning instance; return the fake duplex and a connect-call counter. */
+async function startInstance() {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  let connects = 0;
+  const connect = async () => {
+    connects++;
+    return fake;
+  };
+  createExtension(pi, { connect, getPermissionsService: () => undefined });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  return { pi, fire, fake, connects: () => connects };
+}
+
+// Guards (A1): a replacement (reload/new/resume/fork) disposes the instance —
+// the socket is closed and never reconnects, even if the duplex then drops.
+for (const reason of ["reload", "new", "resume", "fork"]) {
+  test(`session_shutdown reason '${reason}' closes the socket and never reconnects`, async () => {
+    const { fire, fake, connects } = await startInstance();
+    assert.equal(connects(), 1);
+    fire("session_shutdown", { reason }, makeCtx());
+    assert.equal(fake.ended, true, "the socket is closed on every reason");
+    // A drop after dispose must NOT trigger a reconnect.
+    fake.emit("close");
+    await tick();
+    await tick();
+    assert.equal(connects(), 1, "a disposed instance never reconnects");
+  });
+}
+
+// Guards (A1): only a real end (quit) additionally sends { exit }.
+test("session_shutdown reason 'reload' does NOT send exit", async () => {
+  const { fire, fake } = await startInstance();
+  const before = fake.writes.length;
+  fire("session_shutdown", { reason: "reload" }, makeCtx());
+  const frames = fake.writes.slice(before).map((w) => JSON.parse(w));
+  assert.equal(
+    frames.some((f) => f.exit),
+    false,
+    "a non-quit reason is a continuation and never sends exit",
+  );
+  assert.equal(fake.ended, true);
+});
+
+// Guards (A1): shutdown is idempotent — a second shutdown is harmless.
+test("a second session_shutdown is harmless", async () => {
+  const { fire, fake } = await startInstance();
+  fire("session_shutdown", { reason: "reload" }, makeCtx());
+  const afterFirst = fake.writes.length;
+  assert.doesNotThrow(() => fire("session_shutdown", { reason: "quit" }, makeCtx()));
+  assert.equal(fake.writes.length, afterFirst, "a second shutdown writes nothing more");
+});
+
+// Guards (A1): announced asks are settled with an askDone on shutdown, so a
+// phone card never lingers when the instance goes away.
+test("session_shutdown settles announced asks with askDone", async () => {
+  const { fire, fireBus, fake } = await startWithAnswerer();
+  fireBus("permissions:ui_prompt", {
+    requestId: "r1",
+    surface: "bash",
+    value: "x",
+    request: { toolName: "bash" },
+  });
+  await tick();
+  assert.equal(asks(fake).length, 1);
+  fire("session_shutdown", { reason: "reload" }, makeCtx());
+  const done = askDones(fake).at(-1) as { requestId?: string } | undefined;
+  assert.equal(done?.requestId, "r1", "the open ask is settled with an askDone on shutdown");
+});
+
+// Guards (A2): after dispose every handler is a no-op — a later turn_start
+// forwards nothing.
+test("handlers are inert after dispose", async () => {
+  const { fire, fake } = await startInstance();
+  fire("session_shutdown", { reason: "reload" }, makeCtx());
+  const before = fake.writes.length;
+  fire("turn_start", { type: "turn_start" }, makeCtx());
+  fire("turn_end", { type: "turn_end" }, makeCtx());
+  fire("message_start", { type: "message_start" }, makeCtx());
+  assert.equal(fake.writes.length, before, "a disposed instance forwards nothing");
+});
+
+// ── P3: nothing fails silently — diagnostics (spec D3') ──────────────────────
+
+/** Start an owning instance whose getEntries can be made to throw on demand, so
+ *  a boundary flush (message_end at assistant) surfaces through safe() → diag. */
+async function startWithThrowableEntries(now: () => number) {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  const state = { throwMsg: null as string | null };
+  const ctx = makeCtx({
+    sessionManager: {
+      getSessionId: () => "S",
+      getSessionFile: () => undefined,
+      getEntries: () => {
+        if (state.throwMsg) throw new Error(state.throwMsg);
+        return [];
+      },
+    },
+  });
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined, now });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  const boom = () =>
+    fire("message_end", { type: "message_end", message: { role: "assistant" } }, ctx);
+  const diags = () =>
+    fake.writes.map((w) => JSON.parse(w)).filter((f) => f.diag).map((f) => f.diag);
+  return { fire, fake, state, boom, diags };
+}
+
+// Guards (D3'): a handler that throws reports a { diag:{where,message} } frame
+// instead of failing silently, and never throws into pi.
+test("a throwing handler reports a { diag } frame", async () => {
+  const { state, boom, diags } = await startWithThrowableEntries(() => 1000);
+  state.throwMsg = "kaboom";
+  assert.doesNotThrow(() => boom());
+  const d = diags();
+  assert.equal(d.length, 1);
+  assert.match(d[0].message, /kaboom/);
+  assert.equal(typeof d[0].where, "string");
+});
+
+// Guards (D3'): the same message is de-duplicated for 60 s, then reported again.
+test("diag de-duplicates a repeated message for 60 s", async () => {
+  let clock = 1000;
+  const { state, boom, diags } = await startWithThrowableEntries(() => clock);
+  state.throwMsg = "same error";
+  boom(); // t=1000 → reported (1)
+  clock = 5000; // >1s (rate-limit ok) but <60s → deduped
+  boom();
+  assert.equal(diags().length, 1, "a repeat within 60s is suppressed");
+  clock = 1000 + 61_000; // past the 60s window
+  boom();
+  assert.equal(diags().length, 2, "the message is reported again after 60s");
+});
+
+// Guards (D3'): diag is rate-limited to 1/s per instance.
+test("diag is rate-limited to 1 per second", async () => {
+  let clock = 1000;
+  const { state, boom, diags } = await startWithThrowableEntries(() => clock);
+  state.throwMsg = "e1";
+  boom(); // t=1000 → reported (1)
+  clock = 1500;
+  state.throwMsg = "e2"; // distinct message, but within 1s of the last send
+  boom();
+  assert.equal(diags().length, 1, "a second diag within 1s is rate-limited");
+  clock = 2100; // >1s since the last send
+  state.throwMsg = "e3";
+  boom();
+  assert.equal(diags().length, 2, "a diag is allowed again after 1s");
+});
+
+// ── P4: superseded — a genuine duplicate loses deterministically (spec B2) ────
+
+// Guards (B2): { superseded:true } closes the socket permanently (no reconnect)
+// and makes the instance inert.
+test("{ superseded:true } closes the socket permanently and never reconnects", async () => {
+  const { fire, fake, connects } = await startInstance();
+  assert.equal(connects(), 1);
+  fake.push('{"superseded":true}\n');
+  await tick();
+  assert.equal(fake.ended, true, "the socket is closed on superseded");
+  // A later drop must NOT trigger a reconnect.
+  fake.emit("close");
+  await tick();
+  await tick();
+  assert.equal(connects(), 1, "a superseded instance never reconnects");
+  // Inert: further events forward nothing.
+  const before = fake.writes.length;
+  fire("turn_start", { type: "turn_start" }, makeCtx());
+  assert.equal(fake.writes.length, before, "a superseded instance is inert");
+});
+
+// Guards (B2): a one-line notice is shown when the context is still valid.
+test("{ superseded:true } shows a one-line notice", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  const { ctx, notify } = ctxWithNotify();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  fake.push('{"superseded":true}\n');
+  await tick();
+  assert.equal(notify.calls.length, 1, "exactly one notice on superseded");
 });

@@ -18,6 +18,13 @@ export interface RegisterArgs {
   dir: string;
   piVersion: string;
   extensionVersion: string;
+  /** The pi session id (spec §9), always present from 0.7.0 on. Distinct from
+   *  `sessionId`, which is the stable slot identity (the tmux/@hail_session id
+   *  for hail-identity panes). */
+  piSessionId?: string;
+  /** A random id per pi-hail instance (spec §9), so the daemon can tell one
+   *  instance from another across a slot's lifetime. */
+  instanceId?: string;
   /** Which identity rule produced project/work (spec §4.1). Omitted by 0.1.x. */
   identity?: "hail" | "proj" | "fallback";
   /** Present (true) only when the session is tmux-hosted. */
@@ -51,8 +58,11 @@ export type Outbound =
   | { lock: "held" | "released" }
   | { exit: { code: number } }
   | { refused: { requestId: string; reason: "turn_running" } }
+  | { refused: { requestId: string; reason: "error"; error: string } }
+  | { accepted: { requestId: string } }
   | { connection: "connect" | "disconnect" }
-  | { resend: "done" }
+  | { resend: "done"; error?: string }
+  | { diag: { where: string; message: string } }
   | {
       ask: {
         requestId: string;

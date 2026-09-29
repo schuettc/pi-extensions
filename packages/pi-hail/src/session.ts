@@ -138,6 +138,10 @@ export interface RegisterInput {
   work: string;
   dir: string;
   piVersion: string;
+  /** The pi session id (spec §9), always set by the extension from 0.7.0. */
+  piSessionId?: string;
+  /** A random id per pi-hail instance (spec §9). */
+  instanceId?: string;
   identity?: "hail" | "proj" | "fallback";
   tmux?: { socket?: string; session?: string; pane?: string };
   /** The pane's current session-file position (streaming spec §4.1). */
@@ -302,6 +306,8 @@ export class Session {
       piVersion: input.piVersion,
       extensionVersion: EXTENSION_VERSION,
     };
+    if (input.piSessionId !== undefined) args.piSessionId = input.piSessionId;
+    if (input.instanceId !== undefined) args.instanceId = input.instanceId;
     if (input.identity) args.identity = input.identity;
     if (input.tmux) {
       args.tmux = true;
@@ -415,17 +421,40 @@ export class Session {
     return true;
   }
 
-  /** A clean pi exit tells the phone the session is gone. */
+  /** A clean pi exit (quit only) tells the phone the session is gone. */
   exit(code: number): void {
     if (!this.isActive) return;
     this.sendBoundary({ exit: { code } });
-    this.clearAnnouncedAsks();
   }
 
   /**
-   * Drop every announced ask. The permission system's own dialog still owns
-   * each ask's lifecycle; the daemon stale-acks any open ask on extension exit
-   * / re-register, so pi-hail simply forgets them (no askDone).
+   * Dispose the session controller (spec A1): settle every announced ask with
+   * an askDone so no phone card lingers, then go inert. Idempotent \u2014 a second
+   * dispose (or any frame after it) is a no-op. Called from session_shutdown for
+   * EVERY reason and on {"superseded":true}.
+   */
+  dispose(): void {
+    if (!this.isActive) return;
+    this.settleAnnouncedAsks();
+    this.isActive = false;
+  }
+
+  /**
+   * Close every announced ask with an askDone(denied, mac). The ask was never
+   * decided (the instance is going away), so the phone card is closed as a
+   * denial from the Mac side. The daemon also stale-acks, but pi-hail settles
+   * explicitly so nothing depends on that path (spec A1).
+   */
+  private settleAnnouncedAsks(): void {
+    for (const requestId of this.announcedAsks) {
+      this.sendBoundary({ askDone: { requestId, outcome: "denied", by: "mac" } });
+    }
+    this.announcedAsks.clear();
+  }
+
+  /**
+   * Drop every announced ask WITHOUT settling (a reconnect re-register: the
+   * daemon re-affirms connection fresh and stale-acks any open ask).
    */
   private clearAnnouncedAsks(): void {
     this.announcedAsks.clear();
@@ -443,10 +472,23 @@ export class Session {
         this.sendBoundary({ refused: { requestId: prompt.requestId, reason: "turn_running" } });
         return;
       }
-      // Attribute the next turn_start to the phone, then inject the prompt as input.
+      // Attribute the next turn_start to the phone, then inject the prompt as
+      // input. Acknowledge delivery (spec D2'): { accepted } on success, or
+      // { refused reason:'error' } if injection throws \u2014 never a silent drop.
       this.pendingPhonePrompt = true;
       this.phase = "phone_turn";
-      this.deps.sendUserMessage(prompt.text);
+      try {
+        this.deps.sendUserMessage(prompt.text);
+      } catch (err) {
+        // Injection failed: don't leave the session stuck on the phone.
+        this.pendingPhonePrompt = false;
+        this.phase = "idle";
+        this.sendBoundary({
+          refused: { requestId: prompt.requestId, reason: "error", error: errorMessage(err) },
+        });
+        return;
+      }
+      this.sendBoundary({ accepted: { requestId: prompt.requestId } });
       return;
     }
     if ("presence" in m) {
@@ -575,10 +617,16 @@ export class Session {
    */
   onResend(since: number, limit = 0): void {
     if (!this.isActive) return;
-    const { kept, skipped, lastSkippedCursor } = trimFrames(
-      entriesAfter(this.deps.getEntries(), since),
-      limit,
-    );
+    // Reading entries can throw on a torn-down/stale context; the catch-up must
+    // still end so the daemon never waits forever (spec D1').
+    let trimmed: ReturnType<typeof trimFrames>;
+    try {
+      trimmed = trimFrames(entriesAfter(this.deps.getEntries(), since), limit);
+    } catch (err) {
+      this.sendBoundary({ resend: "done", error: errorMessage(err) });
+      return;
+    }
+    const { kept, skipped, lastSkippedCursor } = trimmed;
     if (skipped > 0) {
       this.sendBoundary({
         event: { type: "hail_history_trimmed", skipped },
@@ -622,4 +670,10 @@ export class Session {
 /** A non-empty string, or undefined for null / "" / non-strings. */
 function optString(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/** The human-readable message of an unknown throwable, for a diag/error field. */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }

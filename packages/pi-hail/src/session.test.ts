@@ -24,6 +24,22 @@ test("buildRegisterArgs stamps extensionVersion and passes identity through", ()
   });
 });
 
+// Guards (A4): piSessionId and instanceId ride the register payload when present.
+test("buildRegisterArgs carries piSessionId and instanceId when present", () => {
+  const s = new Session(fakeDeps());
+  const args = s.buildRegisterArgs({
+    sessionId: "S",
+    project: "acceptance",
+    work: "first-run",
+    dir: "/abs",
+    piVersion: "0.85.1",
+    piSessionId: "pi-native-123",
+    instanceId: "inst-abc",
+  });
+  assert.equal(args.piSessionId, "pi-native-123");
+  assert.equal(args.instanceId, "inst-abc");
+});
+
 // Guards: adoption facts ride the register payload only when present; absent
 // facts are omitted so older daemons see exactly today's payload.
 test("buildRegisterArgs carries identity and tmux facts when present", () => {
@@ -79,6 +95,29 @@ test("exit emits { exit:{code} }", () => {
   assert.deepEqual(lastSend(deps), { exit: { code: 0 } });
 });
 
+// Guards (A1): dispose settles every announced ask with an askDone and then goes
+// inert, so a torn-down instance leaves no lingering phone card and forwards
+// nothing more.
+test("dispose settles announced asks with askDone and goes inert", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onInbound({ connection: "connected" });
+  s.announceAsk({ requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } });
+  s.dispose();
+  const done = deps.send.calls.map((c) => c[0]).filter((f) => (f as { askDone?: unknown }).askDone);
+  assert.equal(done.length, 1, "one askDone per announced ask");
+  assert.deepEqual((done[0] as { askDone: unknown }).askDone, {
+    requestId: "r1",
+    outcome: "denied",
+    by: "mac",
+  });
+  assert.equal(s.active(), false, "the session is inert after dispose");
+  // Inert: further frames are no-ops.
+  const before = deps.send.calls.length;
+  s.forwardEvent({ type: "message_start" });
+  assert.equal(deps.send.calls.length, before);
+});
+
 // Guards: a phone prompt during the person's own turn is refused with a reason, never silently dropped or queued (spec §4).
 test("prompt during local_turn is refused with reason turn_running", () => {
   const deps = fakeDeps();
@@ -87,6 +126,50 @@ test("prompt during local_turn is refused with reason turn_running", () => {
   s.onInbound({ prompt: { text: "hi", from: "p1", requestId: "r1" } });
   assert.deepEqual(lastSend(deps), { refused: { requestId: "r1", reason: "turn_running" } });
   assert.equal(deps.sendUserMessage.calls.length, 0);
+});
+
+// Guards (D2'): an injected phone prompt is acknowledged — { accepted:{requestId} }
+// after sendUserMessage returns.
+test("an injected phone prompt replies { accepted:{requestId} }", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onInbound({ prompt: { text: "hi", from: "p1", requestId: "r9" } });
+  assert.equal(deps.sendUserMessage.calls.length, 1);
+  assert.deepEqual(lastSend(deps), { accepted: { requestId: "r9" } });
+});
+
+// Guards (D2'): if injection throws, the prompt is refused with reason 'error'
+// carrying the message, and the phase is not left stuck on the phone.
+test("a phone prompt whose sendUserMessage throws replies { refused reason:'error' }", () => {
+  const sent: unknown[] = [];
+  const deps = {
+    send: (o: unknown) => sent.push(o),
+    sendUserMessage: () => {
+      throw new Error("turn busy");
+    },
+    ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {} },
+    getEntries: () => [],
+  };
+  const s = new Session(deps);
+  s.onInbound({ prompt: { text: "hi", from: "p1", requestId: "r10" } });
+  assert.deepEqual(sent, [{ refused: { requestId: "r10", reason: "error", error: "turn busy" } }]);
+});
+
+// Guards (D1'): onResend that fails to read entries still ends the catch-up, with
+// the error attached, so the daemon never waits forever.
+test("onResend sends { resend:'done', error } when reading entries throws", () => {
+  const sent: unknown[] = [];
+  const deps = {
+    send: (o: unknown) => sent.push(o),
+    sendUserMessage: () => {},
+    ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {} },
+    getEntries: () => {
+      throw new Error("no entries");
+    },
+  };
+  const s = new Session(deps);
+  s.onResend(0, 0);
+  assert.deepEqual(sent, [{ resend: "done", error: "no entries" }]);
 });
 
 // Guards: while the phone drives, local typing is held with a visible notice and replayed after — not dropped (spec §4).
@@ -107,12 +190,14 @@ test("phone turn emits lock held on start and released on end", () => {
   const deps = fakeDeps();
   const s = new Session(deps);
   s.onInbound({ prompt: { text: "do it", from: "p1", requestId: "r3" } }); // starts phone turn
+  // The prompt is acknowledged first (spec D2'), then the turn brackets follow.
+  assert.deepEqual(deps.send.calls[0][0], { accepted: { requestId: "r3" } });
   s.turnStart();
-  assert.deepEqual(deps.send.calls[0][0], { lock: "held" });
-  assert.deepEqual(deps.send.calls[1][0], { turn: "start" });
+  assert.deepEqual(deps.send.calls[1][0], { lock: "held" });
+  assert.deepEqual(deps.send.calls[2][0], { turn: "start" });
   s.turnEnd();
-  assert.deepEqual(deps.send.calls[2][0], { turn: "end" });
-  assert.deepEqual(deps.send.calls[3][0], { lock: "released" });
+  assert.deepEqual(deps.send.calls[3][0], { turn: "end" });
+  assert.deepEqual(deps.send.calls[4][0], { lock: "released" });
 });
 
 // Guards: register no longer replays \u2014 the daemon drives catch-up via a
