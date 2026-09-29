@@ -28,14 +28,14 @@ export interface ExtensionDeps {
 // Every handler is best-effort: it sits directly on a pi lifecycle event, and a
 // harness that fails a session start, a turn, or a shutdown is worse than no
 // harness at all. NOTHING here may escape into pi.
-function safe(fn: () => void | Promise<void>): void {
+function safe(fn: () => void | Promise<void>, _where?: string): void {
   try {
     const result = fn();
     if (result && typeof (result as Promise<void>).catch === "function") {
       (result as Promise<void>).catch(() => {});
     }
   } catch {
-    // Best-effort: swallow.
+    // Best-effort: swallow. (P3 wires diagnostic reporting through `_where`.)
   }
 }
 
@@ -144,9 +144,15 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   const connect = deps.connect ?? realConnect;
   const socketPath = deps.socketPath;
 
-  // Ownership is captured at the one session_start that owns the pane; a
-  // subagent node's stays false, so its events and bus registrations are inert.
+  // Ownership is captured at the session_start that owns the pane; a subagent
+  // node's stays false, so its events and bus registrations are inert. With the
+  // A1 lifecycle each pi instance re-runs this factory, so one createExtension
+  // serves exactly one pi session: ownership is bound from THIS instance's own
+  // session_start (no "first start only" guard).
   let ownsThisPane = false;
+  // Set once this instance has been disposed (session_shutdown for any reason,
+  // or {"superseded":true}). After dispose every handler is a no-op.
+  let disposed = false;
   let session: Session | undefined;
   let socket: DaemonSocket | undefined;
   let registerInput: RegisterInput | undefined;
@@ -180,7 +186,8 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   pi.on("session_start", (_event: unknown, ctx: unknown) =>
     safe(() => {
       if (!ownsPane(ctx)) return;
-      if (ownsThisPane) return; // capture identity from the first owning start only
+      if (disposed) return; // a disposed instance never re-binds
+      if (ownsThisPane) return; // this instance already bound its one session
       ownsThisPane = true;
 
       const c = ctx as {
@@ -318,28 +325,47 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
     return { action: "continue" };
   });
 
+  // Dispose this instance's session-scoped resources (spec A1). Idempotent:
+  // reload, session replacement, superseded, and process exit converge here.
+  // `sendExit` (quit only) additionally sends an { exit } frame; a `notice`
+  // (superseded) surfaces a one-line message through pi's UI when the captured
+  // context is still valid. After this runs every handler is a no-op.
+  const dispose = (opts: { sendExit?: boolean; notice?: string } = {}): void => {
+    if (disposed) return;
+    disposed = true;
+    // A quit is a real end: tell the phone the session is gone BEFORE going inert.
+    if (opts.sendExit) safe(() => session?.exit(0), "dispose.exit");
+    // Settle announced asks (askDone) and go inert.
+    safe(() => session?.dispose(), "dispose.session");
+    if (answererDispose) {
+      try {
+        answererDispose();
+      } catch {
+        // best-effort
+      }
+      answererDispose = undefined;
+    }
+    answerer = undefined;
+    answererRegistered = false;
+    if (opts.notice) {
+      try {
+        uiNotify?.(opts.notice, "info");
+      } catch {
+        // The context may already be invalid; the notice is best-effort.
+      }
+    }
+    socket?.close();
+  };
+
   pi.on("session_shutdown", (event: unknown, ctx: unknown) =>
     safe(() => {
       if (!ownsThisPane || !ownsPane(ctx)) return;
       // Fires on every session SWITCH, not only quit: reason ∈
-      // quit|reload|new|resume|fork. Only a REAL end (quit) emits exit + closes
-      // the socket; every other reason is a continuation whose paired
-      // session_start re-registers — do nothing (mirror pi-tmux-bridge).
+      // quit|reload|new|resume|fork. EVERY reason disposes the instance so no
+      // stale DaemonSocket survives; only a REAL end (quit) also sends exit.
       const reason = (event as { reason?: string } | null)?.reason;
-      if (reason && reason !== "quit") return;
-      if (answererDispose) {
-        try {
-          answererDispose();
-        } catch {
-          // best-effort
-        }
-        answererDispose = undefined;
-      }
-      answerer = undefined;
-      answererRegistered = false;
-      session?.exit(0);
-      socket?.close();
-    }),
+      dispose({ sendExit: reason === "quit" });
+    }, "session_shutdown"),
   );
 
   // Permissions: on permissions:ready (robust to load order / survives /reload,

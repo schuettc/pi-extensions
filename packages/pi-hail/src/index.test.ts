@@ -508,3 +508,91 @@ test("session_shutdown reason 'quit' emits { exit }", async () => {
   assert.ok(frames.some((f) => f.exit && f.exit.code === 0), "expected an { exit:{code:0} } frame");
   assert.equal(fake.ended, true);
 });
+
+// ── P1: lifecycle — every reason disposes the instance (spec A1/A2) ─────────
+
+/** Start an owning instance; return the fake duplex and a connect-call counter. */
+async function startInstance() {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  let connects = 0;
+  const connect = async () => {
+    connects++;
+    return fake;
+  };
+  createExtension(pi, { connect, getPermissionsService: () => undefined });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  return { pi, fire, fake, connects: () => connects };
+}
+
+// Guards (A1): a replacement (reload/new/resume/fork) disposes the instance —
+// the socket is closed and never reconnects, even if the duplex then drops.
+for (const reason of ["reload", "new", "resume", "fork"]) {
+  test(`session_shutdown reason '${reason}' closes the socket and never reconnects`, async () => {
+    const { fire, fake, connects } = await startInstance();
+    assert.equal(connects(), 1);
+    fire("session_shutdown", { reason }, makeCtx());
+    assert.equal(fake.ended, true, "the socket is closed on every reason");
+    // A drop after dispose must NOT trigger a reconnect.
+    fake.emit("close");
+    await tick();
+    await tick();
+    assert.equal(connects(), 1, "a disposed instance never reconnects");
+  });
+}
+
+// Guards (A1): only a real end (quit) additionally sends { exit }.
+test("session_shutdown reason 'reload' does NOT send exit", async () => {
+  const { fire, fake } = await startInstance();
+  const before = fake.writes.length;
+  fire("session_shutdown", { reason: "reload" }, makeCtx());
+  const frames = fake.writes.slice(before).map((w) => JSON.parse(w));
+  assert.equal(
+    frames.some((f) => f.exit),
+    false,
+    "a non-quit reason is a continuation and never sends exit",
+  );
+  assert.equal(fake.ended, true);
+});
+
+// Guards (A1): shutdown is idempotent — a second shutdown is harmless.
+test("a second session_shutdown is harmless", async () => {
+  const { fire, fake } = await startInstance();
+  fire("session_shutdown", { reason: "reload" }, makeCtx());
+  const afterFirst = fake.writes.length;
+  assert.doesNotThrow(() => fire("session_shutdown", { reason: "quit" }, makeCtx()));
+  assert.equal(fake.writes.length, afterFirst, "a second shutdown writes nothing more");
+});
+
+// Guards (A1): announced asks are settled with an askDone on shutdown, so a
+// phone card never lingers when the instance goes away.
+test("session_shutdown settles announced asks with askDone", async () => {
+  const { fire, fireBus, fake } = await startWithAnswerer();
+  fireBus("permissions:ui_prompt", {
+    requestId: "r1",
+    surface: "bash",
+    value: "x",
+    request: { toolName: "bash" },
+  });
+  await tick();
+  assert.equal(asks(fake).length, 1);
+  fire("session_shutdown", { reason: "reload" }, makeCtx());
+  const done = askDones(fake).at(-1) as { requestId?: string } | undefined;
+  assert.equal(done?.requestId, "r1", "the open ask is settled with an askDone on shutdown");
+});
+
+// Guards (A2): after dispose every handler is a no-op — a later turn_start
+// forwards nothing.
+test("handlers are inert after dispose", async () => {
+  const { fire, fake } = await startInstance();
+  fire("session_shutdown", { reason: "reload" }, makeCtx());
+  const before = fake.writes.length;
+  fire("turn_start", { type: "turn_start" }, makeCtx());
+  fire("turn_end", { type: "turn_end" }, makeCtx());
+  fire("message_start", { type: "message_start" }, makeCtx());
+  assert.equal(fake.writes.length, before, "a disposed instance forwards nothing");
+});

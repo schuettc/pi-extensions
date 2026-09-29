@@ -79,6 +79,29 @@ test("exit emits { exit:{code} }", () => {
   assert.deepEqual(lastSend(deps), { exit: { code: 0 } });
 });
 
+// Guards (A1): dispose settles every announced ask with an askDone and then goes
+// inert, so a torn-down instance leaves no lingering phone card and forwards
+// nothing more.
+test("dispose settles announced asks with askDone and goes inert", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onInbound({ connection: "connected" });
+  s.announceAsk({ requestId: "r1", surface: "bash", value: "x", request: { toolName: "bash" } });
+  s.dispose();
+  const done = deps.send.calls.map((c) => c[0]).filter((f) => (f as { askDone?: unknown }).askDone);
+  assert.equal(done.length, 1, "one askDone per announced ask");
+  assert.deepEqual((done[0] as { askDone: unknown }).askDone, {
+    requestId: "r1",
+    outcome: "denied",
+    by: "mac",
+  });
+  assert.equal(s.active(), false, "the session is inert after dispose");
+  // Inert: further frames are no-ops.
+  const before = deps.send.calls.length;
+  s.forwardEvent({ type: "message_start" });
+  assert.equal(deps.send.calls.length, before);
+});
+
 // Guards: a phone prompt during the person's own turn is refused with a reason, never silently dropped or queued (spec §4).
 test("prompt during local_turn is refused with reason turn_running", () => {
   const deps = fakeDeps();

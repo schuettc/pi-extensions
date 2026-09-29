@@ -415,17 +415,40 @@ export class Session {
     return true;
   }
 
-  /** A clean pi exit tells the phone the session is gone. */
+  /** A clean pi exit (quit only) tells the phone the session is gone. */
   exit(code: number): void {
     if (!this.isActive) return;
     this.sendBoundary({ exit: { code } });
-    this.clearAnnouncedAsks();
   }
 
   /**
-   * Drop every announced ask. The permission system's own dialog still owns
-   * each ask's lifecycle; the daemon stale-acks any open ask on extension exit
-   * / re-register, so pi-hail simply forgets them (no askDone).
+   * Dispose the session controller (spec A1): settle every announced ask with
+   * an askDone so no phone card lingers, then go inert. Idempotent \u2014 a second
+   * dispose (or any frame after it) is a no-op. Called from session_shutdown for
+   * EVERY reason and on {"superseded":true}.
+   */
+  dispose(): void {
+    if (!this.isActive) return;
+    this.settleAnnouncedAsks();
+    this.isActive = false;
+  }
+
+  /**
+   * Close every announced ask with an askDone(denied, mac). The ask was never
+   * decided (the instance is going away), so the phone card is closed as a
+   * denial from the Mac side. The daemon also stale-acks, but pi-hail settles
+   * explicitly so nothing depends on that path (spec A1).
+   */
+  private settleAnnouncedAsks(): void {
+    for (const requestId of this.announcedAsks) {
+      this.sendBoundary({ askDone: { requestId, outcome: "denied", by: "mac" } });
+    }
+    this.announcedAsks.clear();
+  }
+
+  /**
+   * Drop every announced ask WITHOUT settling (a reconnect re-register: the
+   * daemon re-affirms connection fresh and stale-acks any open ask).
    */
   private clearAnnouncedAsks(): void {
     this.announcedAsks.clear();
