@@ -28,7 +28,7 @@ test("tokenToText maps every outcome and never echoes a value", () => {
   assert.match(tokenToText("added", "OPENAI_API_KEY", ".env"), /Added OPENAI_API_KEY to \.env/);
   assert.match(tokenToText("updated", "OPENAI_API_KEY", ".env"), /Updated OPENAI_API_KEY in \.env/);
   assert.match(tokenToText("cancelled", "K", ".env"), /cancelled/i);
-  assert.match(tokenToText("error:dest-outside-cwd", "K", ".env"), /Could not store K: dest-outside-cwd/);
+  assert.match(tokenToText("error:dest-outside-cwd", "K", ".env", "/p"), /Could not store K: dest must be inside the working directory \(\/p\)/);
   assert.match(tokenToText(undefined, "K", ".env"), /Timed out/);
   assert.match(tokenToText("", "K", ".env"), /Timed out/);
   assert.match(tokenToText("weird", "K", ".env"), /unexpected status \(weird\)/);

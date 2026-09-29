@@ -1,3 +1,4 @@
+import { isAbsolute, relative, resolve, sep } from "node:path";
 // Pure pieces of the request_secret tool: parameter schema, env-var name
 // validation, the popup command string, and the status-token -> reply mapping.
 // None of these ever see the captured value — creel writes it straight to the
@@ -14,7 +15,7 @@ export const REQUEST_SECRET_PARAMS = {
     dest: {
       type: "string",
       description:
-        "Path to the .env file to write, relative to the working directory. Defaults to .env.",
+        "Path to the .env file to write. Must be inside the working directory (relative, e.g. .env or .worktrees/<name>/.env); creel refuses anything outside it. Defaults to .env.",
     },
   },
   required: ["name"],
@@ -38,10 +39,29 @@ export function creelCommand(name: string, dest: string, statusFile: string): st
 
 // tokenToText maps creel's status token to the reply the model sees. It never
 // includes the secret — only the outcome.
+// destInsideCwd mirrors creel's own rule (ResolveDest): an agent-chosen dest
+// resolves against the working directory and may not leave it. Checked here
+// too, so a refused path never opens a popup the user then sees fail.
+export function destInsideCwd(cwd: string, dest: string): boolean {
+  const rel = relative(cwd, resolve(cwd, dest));
+  return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+// outsideCwdText is the reply for a dest outside the working directory: the
+// rule, and a path that works.
+export function outsideCwdText(name: string, cwd: string): string {
+  return (
+    `Could not store ${name}: dest must be inside the working directory (${cwd}), ` +
+    "so a secret only lands where this project keeps its own files. Use a path under it, " +
+    "e.g. .env, or .worktrees/<name>/.env for scratch work; nothing was written."
+  );
+}
+
 export function tokenToText(
   token: string | undefined,
   name: string,
   dest: string,
+  cwd: string = process.cwd(),
 ): string {
   if (token === undefined || token === "") {
     return `Timed out waiting for the creel popup; nothing was recorded for ${name}.`;
@@ -61,6 +81,7 @@ export function tokenToText(
     case "cancelled":
       return `Capture cancelled; nothing was written for ${name}.`;
     default:
+      if (token === "error:dest-outside-cwd") return outsideCwdText(name, cwd);
       if (token.startsWith("error:")) {
         return `Could not store ${name}: ${token.slice("error:".length)}.`;
       }

@@ -89,6 +89,56 @@ test("reports a timeout when no token arrives", async () => {
 
 test("surfaces a creel error token", async () => {
   const reg = harness(okDeps({ waitForToken: async () => "error:dest-outside-cwd" }));
-  const text = await run(reg, { name: "K", dest: "../x.env" });
-  assert.match(text, /Could not store K: dest-outside-cwd/);
+  const text = await run(reg, { name: "K", dest: "sub/.env" });
+  assert.match(text, /Could not store K: dest must be inside the working directory/);
+});
+
+// The popup exits non-zero when creel refuses (tmux then throws), but creel has
+// already written its reason to the status file: the agent must get that
+// reason, not a bare "Command failed".
+test("a popup that exits non-zero still reports creel's reason", async () => {
+  const reg = harness(okDeps({
+    spawnPopup: () => { throw new Error("Command failed: tmux display-popup ..."); },
+    readStatus: () => "error:dest-outside-cwd",
+  }));
+  const text = await run(reg, { name: "K", dest: "sub/.env" });
+  assert.match(text, /Could not store K/);
+  assert.match(text, /inside the working directory/);
+  assert.doesNotMatch(text, /Command failed/);
+});
+
+test("a popup that fails with no status keeps the tmux error", async () => {
+  const reg = harness(okDeps({
+    spawnPopup: () => { throw new Error("no server running"); },
+    readStatus: () => undefined,
+  }));
+  assert.match(await run(reg, { name: "K" }), /Failed to run the creel popup: .*no server running/);
+});
+
+// A dest outside the working directory is refused before any popup opens, with
+// the rule and a path that works.
+test("a dest outside the working directory is refused without opening the popup", async () => {
+  for (const dest of ["../../tmp/x/.env", "/tmp/x/.env"]) {
+    let spawned = false;
+    const reg = harness(okDeps({ spawnPopup: () => { spawned = true; } }));
+    const text = await run(reg, { name: "K", dest });
+    assert.equal(spawned, false, `popup opened for ${dest}`);
+    assert.match(text, /inside the working directory/);
+    assert.match(text, /\.worktrees\//);
+  }
+});
+
+test("a dest inside the working directory, absolute or relative, opens the popup", async () => {
+  for (const dest of [".worktrees/check/.env", `${process.cwd()}/sub/.env`]) {
+    let spawned = false;
+    const reg = harness(okDeps({ spawnPopup: () => { spawned = true; } }));
+    await run(reg, { name: "K", dest });
+    assert.equal(spawned, true, `popup not opened for ${dest}`);
+  }
+});
+
+test("the tool description states the dest rule", () => {
+  let def: any;
+  createCreel({ registerTool(d: any) { def = d; } }, okDeps());
+  assert.match(def.parameters.properties.dest.description, /inside the working directory/);
 });

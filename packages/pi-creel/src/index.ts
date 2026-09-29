@@ -24,6 +24,8 @@ import {
   REQUEST_SECRET_PARAMS,
   creelCommand,
   tokenToText,
+  destInsideCwd,
+  outsideCwdText,
   validName,
 } from "./capture.ts";
 import { parseEvent, savedMessage } from "./notify.ts";
@@ -41,6 +43,7 @@ export type Deps = {
   spawnPopup?: (tmux: TmuxContext, command: string) => void;
   waitForToken?: (statusPath: string, timeoutMs: number) => Promise<string | undefined>;
   tmpStatusPath?: () => string;
+  readStatus?: (statusPath: string) => string | undefined;
   resolveSessionId?: (tmux: TmuxContext) => string | undefined;
   homedir?: () => string;
   watch?: (dir: string, cb: (event: string, filename: string | null) => void) => WatchHandle;
@@ -48,6 +51,14 @@ export type Deps = {
   eventMtimeMs?: (path: string) => number;
   mkdir?: (dir: string) => void;
 };
+
+function defaultReadStatus(statusPath: string): string | undefined {
+  try {
+    return existsSync(statusPath) ? readFileSync(statusPath, "utf-8").trim() || undefined : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function defaultCreelOnPath(): boolean {
   try {
@@ -114,6 +125,7 @@ export function createCreel(pi: any, deps: Deps = {}): void {
   const spawn = deps.spawnPopup ?? defaultSpawnPopup;
   const wait = deps.waitForToken ?? defaultWaitForToken;
   const tmpPath = deps.tmpStatusPath ?? defaultTmpStatusPath;
+  const readStatus = deps.readStatus ?? defaultReadStatus;
 
   pi.registerTool({
     name: "request_secret",
@@ -143,12 +155,20 @@ export function createCreel(pi: any, deps: Deps = {}): void {
         );
       }
 
+      if (!destInsideCwd(process.cwd(), dest)) {
+        return reply(outsideCwdText(name, process.cwd()));
+      }
+
       const statusPath = tmpPath();
       try {
         spawn(tmux, creelCommand(name, dest, statusPath));
         const token = await wait(statusPath, TOKEN_TIMEOUT_MS);
         return reply(tokenToText(token, name, dest));
       } catch (error) {
+        // creel exits non-zero when it refuses, and tmux then reports a bare
+        // "Command failed"; creel's reason is already in the status file.
+        const token = readStatus(statusPath);
+        if (token) return reply(tokenToText(token, name, dest));
         return reply(`Failed to run the creel popup: ${String(error)}`);
       } finally {
         try {
