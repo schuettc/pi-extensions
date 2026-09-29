@@ -155,6 +155,9 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
     if (seenUntil !== undefined && seenUntil > t) return; // de-duplicated (60 s)
     if (t - lastDiagAt < 1000) return; // rate-limited (1/s)
     lastDiagAt = t;
+    // Prune expired entries so distinct messages can't grow the map without
+    // bound; with the 1/s limit it holds at most ~60 live entries.
+    for (const [m, until] of diagSeen) if (until <= t) diagSeen.delete(m);
     diagSeen.set(message, t + 60_000);
     inDiag = true;
     try {
@@ -219,7 +222,7 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   // reconnect must swallow a rejected promise: a dead daemon rejects, and pi
   // must still start / keep running with no unhandled rejection.
   const register = (): void => {
-    if (!socket || !session || !registerInput) return;
+    if (disposed || !socket || !session || !registerInput) return;
     // The cursor is recomputed at EACH register (spec A3): a reconnect after a
     // daemon outage must report where the pane IS now, not where it started.
     if (computeCursor) {
