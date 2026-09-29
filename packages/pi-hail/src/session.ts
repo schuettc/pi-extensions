@@ -138,6 +138,10 @@ export interface RegisterInput {
   work: string;
   dir: string;
   piVersion: string;
+  /** The pi session id (spec §9), always set by the extension from 0.7.0. */
+  piSessionId?: string;
+  /** A random id per pi-hail instance (spec §9). */
+  instanceId?: string;
   identity?: "hail" | "proj" | "fallback";
   tmux?: { socket?: string; session?: string; pane?: string };
   /** The pane's current session-file position (streaming spec §4.1). */
@@ -302,6 +306,8 @@ export class Session {
       piVersion: input.piVersion,
       extensionVersion: EXTENSION_VERSION,
     };
+    if (input.piSessionId !== undefined) args.piSessionId = input.piSessionId;
+    if (input.instanceId !== undefined) args.instanceId = input.instanceId;
     if (input.identity) args.identity = input.identity;
     if (input.tmux) {
       args.tmux = true;

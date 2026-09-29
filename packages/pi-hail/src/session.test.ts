@@ -24,6 +24,22 @@ test("buildRegisterArgs stamps extensionVersion and passes identity through", ()
   });
 });
 
+// Guards (A4): piSessionId and instanceId ride the register payload when present.
+test("buildRegisterArgs carries piSessionId and instanceId when present", () => {
+  const s = new Session(fakeDeps());
+  const args = s.buildRegisterArgs({
+    sessionId: "S",
+    project: "acceptance",
+    work: "first-run",
+    dir: "/abs",
+    piVersion: "0.85.1",
+    piSessionId: "pi-native-123",
+    instanceId: "inst-abc",
+  });
+  assert.equal(args.piSessionId, "pi-native-123");
+  assert.equal(args.instanceId, "inst-abc");
+});
+
 // Guards: adoption facts ride the register payload only when present; absent
 // facts are omitted so older daemons see exactly today's payload.
 test("buildRegisterArgs carries identity and tmux facts when present", () => {

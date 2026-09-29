@@ -149,6 +149,70 @@ test("register frame reports cursor = getEntries().length", async () => {
   assert.equal(reg.args.cursor, 3);
 });
 
+// Guards (A4): every register frame carries piSessionId (the pi session id,
+// always) and instanceId (random per pi-hail instance).
+test("register frame carries piSessionId and instanceId", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire("session_start", {}, makeCtx());
+  await tick();
+  await tick();
+  const reg = JSON.parse(fake.writes[0]);
+  assert.equal(reg.args.piSessionId, "S", "piSessionId is the pi session id");
+  assert.equal(typeof reg.args.instanceId, "string");
+  assert.ok(reg.args.instanceId.length > 0, "instanceId is a non-empty random id");
+});
+
+// Guards (A4): two instances get distinct instanceIds.
+test("each instance gets a distinct instanceId", async () => {
+  const idOf = async () => {
+    const { pi, fire } = makeFakePi();
+    const fake = new FakeDuplex();
+    createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+    fire("session_start", {}, makeCtx());
+    await tick();
+    await tick();
+    return JSON.parse(fake.writes[0]).args.instanceId as string;
+  };
+  assert.notEqual(await idOf(), await idOf());
+});
+
+// Guards (A3): the cursor is computed at EACH register call, so a reconnect
+// after work was done reports where the pane IS, not where it started.
+test("a re-register after reconnect sends the current cursor", async () => {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  const entries: unknown[] = [{ type: "message" }, { type: "message" }];
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined });
+  fire(
+    "session_start",
+    {},
+    makeCtx({
+      sessionManager: {
+        getSessionId: () => "S",
+        getSessionFile: () => undefined,
+        getEntries: () => entries,
+      },
+    }),
+  );
+  await tick();
+  await tick();
+  assert.equal(JSON.parse(fake.writes[0]).args.cursor, 2, "first register reports the current cursor");
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  // Work happened; the pane moved forward.
+  entries.push({ type: "message" }, { type: "message" });
+  // The daemon dropped: the socket reconnects and re-registers.
+  fake.emit("close");
+  await new Promise((r) => setTimeout(r, 700));
+  const regFrames = fake.writes
+    .map((w) => JSON.parse(w))
+    .filter((f) => f.cmd === "session.register");
+  assert.equal(regFrames.length, 2, "the socket re-registered after reconnect");
+  assert.equal(regFrames[1].args.cursor, 4, "the re-register reports the CURRENT cursor");
+});
+
 // Guards: a daemon-spawned pi must register under the Hail task id stamped on
 // its tmux window, not pi's independently generated native session id. The
 // daemon holds the phone's pending prompt under this exact id.

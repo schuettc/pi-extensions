@@ -6,6 +6,7 @@
 // a missing/slow daemon never blocks a turn.
 
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
@@ -150,6 +151,12 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   // serves exactly one pi session: ownership is bound from THIS instance's own
   // session_start (no "first start only" guard).
   let ownsThisPane = false;
+  // A random id for THIS pi-hail instance (spec A4), stable for its lifetime so
+  // the daemon can tell one instance from another across a slot's history.
+  const instanceId = randomUUID();
+  // Computes the pane's CURRENT in-memory cursor at each register call (spec A3);
+  // bound in session_start from the owning context's getEntries.
+  let computeCursor: (() => number) | undefined;
   // Set once this instance has been disposed (session_shutdown for any reason,
   // or {"superseded":true}). After dispose every handler is a no-op.
   let disposed = false;
@@ -177,6 +184,9 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   // must still start / keep running with no unhandled rejection.
   const register = (): void => {
     if (!socket || !session || !registerInput) return;
+    // The cursor is recomputed at EACH register (spec A3): a reconnect after a
+    // daemon outage must report where the pane IS now, not where it started.
+    if (computeCursor) registerInput.cursor = computeCursor();
     socket
       .register(session.buildRegisterArgs(registerInput))
       .then((reply) => safe(() => session?.onRegisterReply(reply)))
@@ -205,6 +215,10 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       // never the lazily-written session file. Bound so handlers outside this
       // closure (the forwarded-event loop) read the pane's current position.
       const getEntries = (): unknown[] => c.sessionManager.getEntries?.() ?? [];
+      computeCursor = () => getEntries().length;
+      // The pi session id (spec A4), always reported. Distinct from the slot
+      // identity below, which for a hail-identity pane is the @hail_session id.
+      const piSessionId = String(c.sessionManager.getSessionId());
       const facts = deps.getTmuxFacts ? deps.getTmuxFacts() : readTmuxFacts();
       // Back-compat test seam: an injected @hail_session id overrides the facts.
       if (deps.getTmuxSessionId) facts.hailSession = deps.getTmuxSessionId();
@@ -217,6 +231,8 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         work: id.work,
         dir,
         piVersion,
+        piSessionId,
+        instanceId,
         identity: id.identity,
         ...(facts.inTmux
           ? { tmux: { socket: facts.socketPath, session: facts.sessionName, pane: facts.paneId } }
