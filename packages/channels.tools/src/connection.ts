@@ -18,6 +18,9 @@ const RETRY_MAX_MS = 5 * 60_000;
 // process open, but here that would let Node exit before the SIGKILL is
 // delivered, orphaning the very child this timer exists to kill.
 const KILL_GRACE_MS = 300;
+// How many recent stderr lines a channel keeps for crash context; a healthy
+// channel's stderr is never surfaced, only this tail on an abnormal exit.
+const STDERR_TAIL_LINES = 20;
 
 // Tracks children currently mid-kill so two killChild() calls landing in the
 // same tick (e.g. conn.close() followed by closeAll() sweeping `pending`)
@@ -236,9 +239,23 @@ export class ConnectionManager {
     child.stdin?.on("error", (err) => this.opts.log(`channel ${name}: stdin error: ${String(err)}`));
     child.stdout?.on("error", (err) => this.opts.log(`channel ${name}: stdout error: ${String(err)}`));
 
+    // A channel server's stderr is DIAGNOSTIC, not an event. galley writes its
+    // startup line, "adopting…" and "editor stopped" notices there for a debug
+    // log; muster logs there too. Surfacing every line as a pane message (which
+    // this used to do) turned routine channel logging into what reads as a
+    // stream of errors. So buffer it and surface it ONLY when the channel exits
+    // abnormally — where the tail is the crash context worth seeing. A healthy
+    // channel's stderr never reaches the pane. (The stdin/stdout pipe-error
+    // handlers above still surface: a broken pipe is a delivery failure, not
+    // logging.)
+    const errTail: string[] = [];
     child.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf-8").trim();
-      if (text !== "") this.opts.log(`channel ${name} stderr: ${text}`);
+      for (const line of chunk.toString("utf-8").split("\n")) {
+        const t = line.trim();
+        if (t === "") continue;
+        errTail.push(t);
+        if (errTail.length > STDERR_TAIL_LINES) errTail.shift();
+      }
     });
 
     const client = new JsonRpcClient({ stdin: child.stdin!, stdout: child.stdout! });
@@ -251,16 +268,21 @@ export class ConnectionManager {
     // instead of waiting out JsonRpcClient's 30s timeout.
     let handshakeDone = false;
     child.once("exit", (code) => {
+      // Surface the stderr tail only where the exit itself is the news: a
+      // non-zero code (the channel crashed) or a death during handshake. Our
+      // own SIGTERM (code null) is a clean shutdown and dumps nothing.
+      const tail = errTail.length ? "\n" + errTail.join("\n") : "";
+      const crash = code !== 0 && code !== null;
       const entry = this.live.get(name);
       if (entry && entry.child === child) {
         this.live.delete(name);
-        this.opts.log(`channel ${name}: exited (code ${code ?? "null"})`);
+        this.opts.log(`channel ${name}: exited (code ${code ?? "null"})${crash ? tail : ""}`);
         this.publishStatus();
         this.scheduleRetry(name, gen);
         return;
       }
       if (!handshakeDone) {
-        this.opts.log(`channel ${name}: exited during handshake (code ${code ?? "null"})`);
+        this.opts.log(`channel ${name}: exited during handshake (code ${code ?? "null"})${tail}`);
         client.close();
       }
     });
