@@ -12,7 +12,13 @@ import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import type { PermissionsService, PromptAnswerer } from "@gotgenes/pi-permission-system";
 import { DaemonSocket, realConnect, type Connect } from "./socket.ts";
-import { Session, type RegisterInput, type SessionDeps, type UiPromptFacts } from "./session.ts";
+import {
+  Session,
+  errorMessage,
+  type RegisterInput,
+  type SessionDeps,
+  type UiPromptFacts,
+} from "./session.ts";
 import { deriveIdentity, type TmuxFacts } from "./identity.ts";
 import { runHailCommand } from "./command.ts";
 
@@ -24,21 +30,10 @@ export interface ExtensionDeps {
   getTmuxSessionId?: () => string | undefined;
   /** Test seam: tmux facts for this pane (defaults to one `tmux display-message`). */
   getTmuxFacts?: () => TmuxFacts;
+  /** Test seam: clock for the diag rate-limiter (defaults to Date.now). */
+  now?: () => number;
 }
 
-// Every handler is best-effort: it sits directly on a pi lifecycle event, and a
-// harness that fails a session start, a turn, or a shutdown is worse than no
-// harness at all. NOTHING here may escape into pi.
-function safe(fn: () => void | Promise<void>, _where?: string): void {
-  try {
-    const result = fn();
-    if (result && typeof (result as Promise<void>).catch === "function") {
-      (result as Promise<void>).catch(() => {});
-    }
-  } catch {
-    // Best-effort: swallow. (P3 wires diagnostic reporting through `_where`.)
-  }
-}
 
 // One `tmux display-message` for every fact, targeted at this pane when tmux
 // exported TMUX_PANE. A bare terminal (no $TMUX) reports inTmux:false. Guarded
@@ -144,6 +139,47 @@ const FORWARDED_EVENTS = [
 export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
   const connect = deps.connect ?? realConnect;
   const socketPath = deps.socketPath;
+  const now = deps.now ?? (() => Date.now());
+
+  // Diagnostics (spec D3'): report a swallowed error to the daemon as a { diag }
+  // frame, rate-limited to 1/s per instance and de-duplicated per message for
+  // 60 s. Never throws into pi, never prints to the TUI. A reentrancy guard keeps
+  // a diag send (which may itself fail) from spawning more diags.
+  let lastDiagAt = Number.NEGATIVE_INFINITY;
+  const diagSeen = new Map<string, number>();
+  let inDiag = false;
+  const reportDiag = (where: string, message: string): void => {
+    if (inDiag) return;
+    const t = now();
+    const seenUntil = diagSeen.get(message);
+    if (seenUntil !== undefined && seenUntil > t) return; // de-duplicated (60 s)
+    if (t - lastDiagAt < 1000) return; // rate-limited (1/s)
+    lastDiagAt = t;
+    diagSeen.set(message, t + 60_000);
+    inDiag = true;
+    try {
+      socket?.send({ diag: { where, message } });
+    } catch {
+      // best-effort: a diag must never throw into pi
+    } finally {
+      inDiag = false;
+    }
+  };
+
+  // Every handler is best-effort: it sits directly on a pi lifecycle event, and a
+  // harness that fails a session start, a turn, or a shutdown is worse than no
+  // harness at all. NOTHING here may escape into pi \u2014 a throw is reported through
+  // a { diag } frame (spec D3'), never printed to the TUI.
+  const safe = (fn: () => void | Promise<void>, where = "handler"): void => {
+    try {
+      const result = fn();
+      if (result && typeof (result as Promise<void>).catch === "function") {
+        (result as Promise<void>).catch((err) => reportDiag(where, errorMessage(err)));
+      }
+    } catch (err) {
+      reportDiag(where, errorMessage(err));
+    }
+  };
 
   // Ownership is captured at the session_start that owns the pane; a subagent
   // node's stays false, so its events and bus registrations are inert. With the
@@ -186,7 +222,13 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
     if (!socket || !session || !registerInput) return;
     // The cursor is recomputed at EACH register (spec A3): a reconnect after a
     // daemon outage must report where the pane IS now, not where it started.
-    if (computeCursor) registerInput.cursor = computeCursor();
+    if (computeCursor) {
+      try {
+        registerInput.cursor = computeCursor();
+      } catch (err) {
+        reportDiag("register.cursor", errorMessage(err));
+      }
+    }
     socket
       .register(session.buildRegisterArgs(registerInput))
       .then((reply) => safe(() => session?.onRegisterReply(reply)))
@@ -280,6 +322,8 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         // The session knows the register args + replay cursor; re-register on
         // reconnect (which triggers replay after the daemon's `have` cursor).
         onReconnect: () => register(),
+        // Report the socket's swallowed errors through the same rate-limited path.
+        onDiag: (where, message) => reportDiag(where, message),
       });
       register();
     }),
@@ -321,7 +365,7 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         // The Session tags a persisted message_end with its cursor from the
         // in-memory entry list (spec \u00a74.3); everything else forwards verbatim.
         session.forwardEvent(event);
-      }),
+      }, `event:${name}`),
     );
   }
 

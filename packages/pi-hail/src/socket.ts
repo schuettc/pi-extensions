@@ -83,6 +83,9 @@ interface Deps {
   onDown: () => void;
   /** The socket owns reconnect scheduling but delegates re-registration here. */
   onReconnect?: () => void | Promise<void>;
+  /** Report a swallowed error (spec D3'); the caller rate-limits and forwards it
+   *  to the daemon as a { diag } frame. Never throws. */
+  onDiag?: (where: string, message: string) => void;
 }
 
 const DEFAULT_BACKOFF = [500, 1000, 2000, 5000, 10000];
@@ -94,6 +97,7 @@ export class DaemonSocket {
   private readonly onLine: (msg: unknown) => void;
   private readonly onDown: () => void;
   private readonly onReconnect?: () => void | Promise<void>;
+  private readonly onDiag?: (where: string, message: string) => void;
 
   private duplex: Duplex | null = null;
   private buffer = "";
@@ -115,6 +119,17 @@ export class DaemonSocket {
     this.onLine = deps.onLine;
     this.onDown = deps.onDown;
     this.onReconnect = deps.onReconnect;
+    this.onDiag = deps.onDiag;
+  }
+
+  /** Report a swallowed error through onDiag; never throws (spec D3'). */
+  private diag(where: string, err: unknown): void {
+    if (!this.onDiag) return;
+    try {
+      this.onDiag(where, err instanceof Error ? err.message : String(err));
+    } catch {
+      // A diag reporter must never throw into pi.
+    }
   }
 
   /**
@@ -170,8 +185,9 @@ export class DaemonSocket {
     try {
       const ok = this.duplex.write(encodeLine(obj));
       if (ok === false) this.overHighWater = true;
-    } catch {
+    } catch (err) {
       // never throw into pi
+      this.diag("socket.send", err);
     }
   }
 
@@ -204,8 +220,9 @@ export class DaemonSocket {
     for (const cb of this.drainListeners) {
       try {
         cb();
-      } catch {
+      } catch (err) {
         // never throw into pi
+        this.diag("socket.drain", err);
       }
     }
   }
@@ -256,12 +273,14 @@ export class DaemonSocket {
         // Each frame wrapped so a malformed line is dropped, not fatal.
         try {
           this.onLine(decodeLine(line));
-        } catch {
-          // drop malformed line
+        } catch (err) {
+          // drop malformed line, but report it (spec D3')
+          this.diag("socket.onLine", err);
         }
       }
-    } catch {
+    } catch (err) {
       // never throw into pi
+      this.diag("socket.onData", err);
     }
   }
 
@@ -278,8 +297,9 @@ export class DaemonSocket {
     if (wasConnected) {
       try {
         this.onDown();
-      } catch {
+      } catch (err) {
         // never throw into pi
+        this.diag("socket.onDown", err);
       }
     }
     this.scheduleReconnect();

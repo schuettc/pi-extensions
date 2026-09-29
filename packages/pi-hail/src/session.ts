@@ -472,10 +472,23 @@ export class Session {
         this.sendBoundary({ refused: { requestId: prompt.requestId, reason: "turn_running" } });
         return;
       }
-      // Attribute the next turn_start to the phone, then inject the prompt as input.
+      // Attribute the next turn_start to the phone, then inject the prompt as
+      // input. Acknowledge delivery (spec D2'): { accepted } on success, or
+      // { refused reason:'error' } if injection throws \u2014 never a silent drop.
       this.pendingPhonePrompt = true;
       this.phase = "phone_turn";
-      this.deps.sendUserMessage(prompt.text);
+      try {
+        this.deps.sendUserMessage(prompt.text);
+      } catch (err) {
+        // Injection failed: don't leave the session stuck on the phone.
+        this.pendingPhonePrompt = false;
+        this.phase = "idle";
+        this.sendBoundary({
+          refused: { requestId: prompt.requestId, reason: "error", error: errorMessage(err) },
+        });
+        return;
+      }
+      this.sendBoundary({ accepted: { requestId: prompt.requestId } });
       return;
     }
     if ("presence" in m) {
@@ -604,10 +617,16 @@ export class Session {
    */
   onResend(since: number, limit = 0): void {
     if (!this.isActive) return;
-    const { kept, skipped, lastSkippedCursor } = trimFrames(
-      entriesAfter(this.deps.getEntries(), since),
-      limit,
-    );
+    // Reading entries can throw on a torn-down/stale context; the catch-up must
+    // still end so the daemon never waits forever (spec D1').
+    let trimmed: ReturnType<typeof trimFrames>;
+    try {
+      trimmed = trimFrames(entriesAfter(this.deps.getEntries(), since), limit);
+    } catch (err) {
+      this.sendBoundary({ resend: "done", error: errorMessage(err) });
+      return;
+    }
+    const { kept, skipped, lastSkippedCursor } = trimmed;
     if (skipped > 0) {
       this.sendBoundary({
         event: { type: "hail_history_trimmed", skipped },
@@ -651,4 +670,10 @@ export class Session {
 /** A non-empty string, or undefined for null / "" / non-strings. */
 function optString(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/** The human-readable message of an unknown throwable, for a diag/error field. */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
 }

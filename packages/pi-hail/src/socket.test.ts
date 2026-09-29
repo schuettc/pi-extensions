@@ -124,6 +124,32 @@ test("socket close makes connected() false, fires onDown, and send() is a silent
   sock.close();
 });
 
+// Guards (D3'): a throwing onLine (a stale/broken frame handler) is reported
+// through onDiag and never thrown into pi.
+test("a throwing onLine is reported through onDiag, never thrown into pi", async () => {
+  const fake = new FakeDuplex();
+  const diags: { where: string; message: string }[] = [];
+  const sock = new DaemonSocket({
+    connect: async () => fake,
+    backoffMs: [3_600_000],
+    onLine: () => {
+      throw new Error("boom");
+    },
+    onDown: () => {},
+    onDiag: (where, message) => diags.push({ where, message }),
+  });
+  const p = sock.register(REGISTER_ARGS);
+  await Promise.resolve();
+  await Promise.resolve();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await p;
+  assert.doesNotThrow(() => fake.push('{"presence":{"phones":[]}}\n'));
+  assert.equal(diags.length, 1, "the throwing handler is reported once");
+  assert.match(diags[0].message, /boom/);
+  assert.equal(typeof diags[0].where, "string");
+  sock.close();
+});
+
 // Guards: an async onReconnect that rejects (connect failed) must NOT surface an unhandled rejection that kills pi.
 test("async onReconnect that rejects does not leak an unhandled rejection", async () => {
   const fake = new FakeDuplex();

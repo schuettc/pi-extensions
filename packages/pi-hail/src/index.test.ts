@@ -660,3 +660,76 @@ test("handlers are inert after dispose", async () => {
   fire("message_start", { type: "message_start" }, makeCtx());
   assert.equal(fake.writes.length, before, "a disposed instance forwards nothing");
 });
+
+// ── P3: nothing fails silently — diagnostics (spec D3') ──────────────────────
+
+/** Start an owning instance whose getEntries can be made to throw on demand, so
+ *  a boundary flush (message_end at assistant) surfaces through safe() → diag. */
+async function startWithThrowableEntries(now: () => number) {
+  const { pi, fire } = makeFakePi();
+  const fake = new FakeDuplex();
+  const state = { throwMsg: null as string | null };
+  const ctx = makeCtx({
+    sessionManager: {
+      getSessionId: () => "S",
+      getSessionFile: () => undefined,
+      getEntries: () => {
+        if (state.throwMsg) throw new Error(state.throwMsg);
+        return [];
+      },
+    },
+  });
+  createExtension(pi, { connect: async () => fake, getPermissionsService: () => undefined, now });
+  fire("session_start", {}, ctx);
+  await tick();
+  await tick();
+  fake.push('{"ok":true,"data":{"hostId":"h","daemonVersion":"0.3.0","accepted":true}}\n');
+  await tick();
+  const boom = () =>
+    fire("message_end", { type: "message_end", message: { role: "assistant" } }, ctx);
+  const diags = () =>
+    fake.writes.map((w) => JSON.parse(w)).filter((f) => f.diag).map((f) => f.diag);
+  return { fire, fake, state, boom, diags };
+}
+
+// Guards (D3'): a handler that throws reports a { diag:{where,message} } frame
+// instead of failing silently, and never throws into pi.
+test("a throwing handler reports a { diag } frame", async () => {
+  const { state, boom, diags } = await startWithThrowableEntries(() => 1000);
+  state.throwMsg = "kaboom";
+  assert.doesNotThrow(() => boom());
+  const d = diags();
+  assert.equal(d.length, 1);
+  assert.match(d[0].message, /kaboom/);
+  assert.equal(typeof d[0].where, "string");
+});
+
+// Guards (D3'): the same message is de-duplicated for 60 s, then reported again.
+test("diag de-duplicates a repeated message for 60 s", async () => {
+  let clock = 1000;
+  const { state, boom, diags } = await startWithThrowableEntries(() => clock);
+  state.throwMsg = "same error";
+  boom(); // t=1000 → reported (1)
+  clock = 5000; // >1s (rate-limit ok) but <60s → deduped
+  boom();
+  assert.equal(diags().length, 1, "a repeat within 60s is suppressed");
+  clock = 1000 + 61_000; // past the 60s window
+  boom();
+  assert.equal(diags().length, 2, "the message is reported again after 60s");
+});
+
+// Guards (D3'): diag is rate-limited to 1/s per instance.
+test("diag is rate-limited to 1 per second", async () => {
+  let clock = 1000;
+  const { state, boom, diags } = await startWithThrowableEntries(() => clock);
+  state.throwMsg = "e1";
+  boom(); // t=1000 → reported (1)
+  clock = 1500;
+  state.throwMsg = "e2"; // distinct message, but within 1s of the last send
+  boom();
+  assert.equal(diags().length, 1, "a second diag within 1s is rate-limited");
+  clock = 2100; // >1s since the last send
+  state.throwMsg = "e3";
+  boom();
+  assert.equal(diags().length, 2, "a diag is allowed again after 1s");
+});

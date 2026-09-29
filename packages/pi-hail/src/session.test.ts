@@ -128,6 +128,50 @@ test("prompt during local_turn is refused with reason turn_running", () => {
   assert.equal(deps.sendUserMessage.calls.length, 0);
 });
 
+// Guards (D2'): an injected phone prompt is acknowledged — { accepted:{requestId} }
+// after sendUserMessage returns.
+test("an injected phone prompt replies { accepted:{requestId} }", () => {
+  const deps = fakeDeps();
+  const s = new Session(deps);
+  s.onInbound({ prompt: { text: "hi", from: "p1", requestId: "r9" } });
+  assert.equal(deps.sendUserMessage.calls.length, 1);
+  assert.deepEqual(lastSend(deps), { accepted: { requestId: "r9" } });
+});
+
+// Guards (D2'): if injection throws, the prompt is refused with reason 'error'
+// carrying the message, and the phase is not left stuck on the phone.
+test("a phone prompt whose sendUserMessage throws replies { refused reason:'error' }", () => {
+  const sent: unknown[] = [];
+  const deps = {
+    send: (o: unknown) => sent.push(o),
+    sendUserMessage: () => {
+      throw new Error("turn busy");
+    },
+    ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {} },
+    getEntries: () => [],
+  };
+  const s = new Session(deps);
+  s.onInbound({ prompt: { text: "hi", from: "p1", requestId: "r10" } });
+  assert.deepEqual(sent, [{ refused: { requestId: "r10", reason: "error", error: "turn busy" } }]);
+});
+
+// Guards (D1'): onResend that fails to read entries still ends the catch-up, with
+// the error attached, so the daemon never waits forever.
+test("onResend sends { resend:'done', error } when reading entries throws", () => {
+  const sent: unknown[] = [];
+  const deps = {
+    send: (o: unknown) => sent.push(o),
+    sendUserMessage: () => {},
+    ui: { setStatus: () => {}, notify: () => {}, holdInput: () => {} },
+    getEntries: () => {
+      throw new Error("no entries");
+    },
+  };
+  const s = new Session(deps);
+  s.onResend(0, 0);
+  assert.deepEqual(sent, [{ resend: "done", error: "no entries" }]);
+});
+
 // Guards: while the phone drives, local typing is held with a visible notice and replayed after — not dropped (spec §4).
 test("local input during phone_turn is held, then re-submitted on turn end", () => {
   const deps = fakeDeps();
@@ -146,12 +190,14 @@ test("phone turn emits lock held on start and released on end", () => {
   const deps = fakeDeps();
   const s = new Session(deps);
   s.onInbound({ prompt: { text: "do it", from: "p1", requestId: "r3" } }); // starts phone turn
+  // The prompt is acknowledged first (spec D2'), then the turn brackets follow.
+  assert.deepEqual(deps.send.calls[0][0], { accepted: { requestId: "r3" } });
   s.turnStart();
-  assert.deepEqual(deps.send.calls[0][0], { lock: "held" });
-  assert.deepEqual(deps.send.calls[1][0], { turn: "start" });
+  assert.deepEqual(deps.send.calls[1][0], { lock: "held" });
+  assert.deepEqual(deps.send.calls[2][0], { turn: "start" });
   s.turnEnd();
-  assert.deepEqual(deps.send.calls[2][0], { turn: "end" });
-  assert.deepEqual(deps.send.calls[3][0], { lock: "released" });
+  assert.deepEqual(deps.send.calls[3][0], { turn: "end" });
+  assert.deepEqual(deps.send.calls[4][0], { lock: "released" });
 });
 
 // Guards: register no longer replays \u2014 the daemon drives catch-up via a

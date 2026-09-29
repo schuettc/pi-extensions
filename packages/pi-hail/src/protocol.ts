@@ -58,8 +58,11 @@ export type Outbound =
   | { lock: "held" | "released" }
   | { exit: { code: number } }
   | { refused: { requestId: string; reason: "turn_running" } }
+  | { refused: { requestId: string; reason: "error"; error: string } }
+  | { accepted: { requestId: string } }
   | { connection: "connect" | "disconnect" }
-  | { resend: "done" }
+  | { resend: "done"; error?: string }
+  | { diag: { where: string; message: string } }
   | {
       ask: {
         requestId: string;
