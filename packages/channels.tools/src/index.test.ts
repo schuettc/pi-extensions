@@ -20,7 +20,12 @@ function fakePi(sessionId = "session-xyz", mode = "tui") {
   const unregistered: string[] = [];
   const tools = new Map<string, ToolDef>();
   const statuses: string[] = [];
+  const emitted: Array<{ channel: string; data: any }> = [];
   const pi = {
+    events: {
+      emit(channel: string, data: unknown) { emitted.push({ channel, data }); },
+      on(_channel: string, _handler: (data: unknown) => void) { return () => {}; },
+    },
     on(event: string, handler: Handler) {
       const list = handlers.get(event) ?? [];
       list.push(handler);
@@ -50,7 +55,7 @@ function fakePi(sessionId = "session-xyz", mode = "tui") {
     for (const h of handlers.get(event) ?? []) out.push(await h(payload, ctx));
     return out;
   }
-  return { pi, ctx, fire, sent, customs, registered, unregistered, tools, statuses };
+  return { pi, ctx, fire, sent, customs, registered, unregistered, tools, statuses, emitted };
 }
 
 test("session_start never writes AGENT_SESSION_ID into the host environment", async () => {
@@ -163,6 +168,72 @@ test("in rpc mode an inbound event still wakes the session", async () => {
   });
   await fire("session_start", { reason: "startup" });
   await new Promise((r) => setTimeout(r, 500));
+  assert.equal(sent.length, 1);
+  await fire("session_shutdown");
+});
+
+// The coordination contract with pi-tmux-bridge (see README): mail held while
+// a turn runs is announced as channels:pending, and every delivery that starts
+// a turn is announced as channels:delivered. pi-tmux-bridge skips its settle
+// drain on either, because this extension is already starting the turn and
+// the drain would otherwise run a second, stale turn right after it.
+test("mail held during a turn is announced as pending, then as delivered at the settle", async () => {
+  const { pi, fire, sent, emitted } = fakePi("session-xyz");
+  createExtension(pi as never, {
+    env: {},
+    loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_PUSH_AFTER_MS: "50" } } }),
+  });
+  await fire("session_start", { reason: "startup" });
+  await fire("agent_start");
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(sent.length, 0, "held while the turn runs");
+  const pending = emitted.filter((e) => e.channel === "channels:pending");
+  assert.deepEqual(pending.at(-1)?.data, { sessionId: "session-xyz", count: 1 });
+  assert.ok(!emitted.some((e) => e.channel === "channels:delivered"), "nothing delivered yet");
+
+  await fire("agent_settled");
+  assert.equal(sent.length, 1);
+  assert.deepEqual(emitted.filter((e) => e.channel === "channels:delivered").map((e) => e.data), [{ sessionId: "session-xyz" }]);
+  assert.deepEqual(emitted.filter((e) => e.channel === "channels:pending").at(-1)?.data, { sessionId: "session-xyz", count: 0 });
+  await fire("session_shutdown");
+});
+
+test("a delivery while idle is announced as delivered", async () => {
+  const { pi, fire, sent, emitted } = fakePi("session-xyz");
+  createExtension(pi as never, {
+    env: {},
+    loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_PUSH_AFTER_MS: "50" } } }),
+  });
+  await fire("session_start", { reason: "startup" });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal(sent.length, 1);
+  assert.deepEqual(emitted.filter((e) => e.channel === "channels:delivered").map((e) => e.data), [{ sessionId: "session-xyz" }]);
+  await fire("session_shutdown");
+});
+
+test("a one-shot run delivers nothing, so it announces no delivery", async () => {
+  const { pi, fire, emitted } = fakePi("session-xyz", "print");
+  createExtension(pi as never, {
+    env: {},
+    loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_PUSH_AFTER_MS: "50" } } }),
+  });
+  await fire("session_start", { reason: "startup" });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.ok(!emitted.some((e) => e.channel === "channels:delivered"));
+  await fire("session_shutdown");
+});
+
+test("a pi without an event bus still delivers", async () => {
+  const { pi, fire, sent } = fakePi("session-xyz");
+  delete (pi as { events?: unknown }).events;
+  createExtension(pi as never, {
+    env: {},
+    loadConfig: () => ({ fake: { command: process.execPath, args: [FAKE], env: { FAKE_PUSH_AFTER_MS: "50" } } }),
+  });
+  await fire("session_start", { reason: "startup" });
+  await fire("agent_start");
+  await new Promise((r) => setTimeout(r, 500));
+  await fire("agent_settled");
   assert.equal(sent.length, 1);
   await fire("session_shutdown");
 });

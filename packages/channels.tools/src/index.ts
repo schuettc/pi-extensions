@@ -22,7 +22,10 @@ export function createExtension(pi: any, deps: Deps = {}): void {
   const loadConfig = deps.loadConfig ?? ((cwd: string) => loadChannelConfig({ home: homedir(), cwd }));
 
   const manager = new ConnectionManager({
-    onEvent: (event) => wake.onEvent(event),
+    onEvent: (event) => {
+      wake.onEvent(event);
+      announcePending();
+    },
     onStatus: (status) => uiSetStatus(status),
     log: (message) => log(message),
     ...(deps.env !== undefined ? { env: deps.env } : {}),
@@ -49,6 +52,28 @@ export function createExtension(pi: any, deps: Deps = {}): void {
   // processing a prompt"), so events are logged, never delivered. The
   // channel's tools stay registered. Set from session_start's ctx.mode.
   let oneShot = false;
+
+  // The pi-tmux-bridge coordination contract (README, "Coordinating with
+  // pi-tmux-bridge"). That extension runs muster's Stop hook on every
+  // agent_settled and injects a reminder when mail is unread. A turn this
+  // extension starts at the same settle is queued ahead of that reminder, so
+  // the reminder ran second, after the agent had already read the mail — a
+  // stale "you have unread mail" turn. We announce held mail and deliveries on
+  // pi.events so it can skip that settle; the settle after our turn drains
+  // against fresh bus state. sessionId scopes the announcement, in case a
+  // child session shares the bus. emit is synchronous, and optional: a pi
+  // without an event bus just delivers.
+  let sessionId: string | undefined;
+  function announce(channel: string, data: Record<string, unknown>): void {
+    try {
+      pi.events?.emit?.(channel, { sessionId, ...data });
+    } catch (error) {
+      log(`announcing ${channel} failed: ${String(error)}`);
+    }
+  }
+  function announcePending(): void {
+    announce("channels:pending", { count: wake.pendingCount() });
+  }
 
   const wake = createWake({
     deliver: ({ envelope, summary }) => {
@@ -78,6 +103,7 @@ export function createExtension(pi: any, deps: Deps = {}): void {
         { deliverAs: "nextTurn" },
       );
       pi.sendUserMessage(summary, { deliverAs: "steer" });
+      announce("channels:delivered", {});
     },
     log: (message) => log(message),
   });
@@ -224,7 +250,9 @@ export function createExtension(pi: any, deps: Deps = {}): void {
       // used to overwrite the parent's value for every later spawn and bash
       // command. Resolved before the first spawn because servers read
       // AGENT_SESSION_ID at their own startup to scope what they attach to.
-      const sessionId: string | undefined = ctx.sessionManager?.getSessionId?.();
+      // The same id scopes this instance's pi.events announcements.
+      sessionId = ctx.sessionManager?.getSessionId?.();
+      announcePending();
 
       const defs = loadConfig(ctx.cwd ?? process.cwd());
       await manager.connectAll(defs, sessionId);
@@ -256,7 +284,10 @@ export function createExtension(pi: any, deps: Deps = {}): void {
   });
 
   pi.on("agent_start", () => wake.onAgentStart());
-  pi.on("agent_settled", () => wake.onAgentSettled());
+  pi.on("agent_settled", () => {
+    wake.onAgentSettled();
+    announcePending();
+  });
   pi.on("session_shutdown", async () => { await manager.closeAll(); });
 }
 
