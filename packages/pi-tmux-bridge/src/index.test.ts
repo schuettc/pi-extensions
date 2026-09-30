@@ -64,7 +64,7 @@ test("it subscribes to exactly the lifecycle events it needs", async () => {
   createHarness(pi as never, { raiseAttention: noopBell, tmux: () => ctxTmux });
   const subscribed = events().sort();
   assert.deepEqual(subscribed, [
-    "agent_settled", "session_info_changed", "session_shutdown", "session_start", "turn_end",
+    "agent_settled", "agent_start", "session_info_changed", "session_shutdown", "session_start", "turn_end",
   ].sort());
 });
 
@@ -574,6 +574,84 @@ test("it subscribes to exactly the pi.events channels it needs", async () => {
   createHarness(pi as never, { raiseAttention: noopBell, tmux: () => ctxTmux });
   assert.deepEqual(
     busEvents().sort(),
-    ["permissions:decision", "permissions:ui_prompt"].sort(),
+    ["channels:delivered", "channels:pending", "permissions:decision", "permissions:ui_prompt"].sort(),
   );
+});
+
+// Coordination with channels.tools (README, "Coordinating with channels.tools").
+// When channels.tools holds mail during a turn, it delivers that mail at the
+// settle and starts a turn. pi queues every turn requested during a settle and
+// runs them in order, so our drain reminder, computed before that turn, ran
+// AFTER it: a stale "you have unread mail" turn for mail the agent had just
+// read (seen live on thread #252). On such a settle we skip the drain; the
+// settle that follows the channel's turn drains against fresh bus state.
+function coordinatedHarness(stop = () => JSON.stringify({ decision: "block", reason: "You have 1 unread thread" })) {
+  const fp = fakePi();
+  const stopCalls: number[] = [];
+  createHarness(fp.pi as never, { raiseAttention: noopBell,
+    tmux: () => ctxTmux,
+    runTmux: noopTmux,
+    runMuster: (_c, args) => {
+      if (args[1] === "Stop") { stopCalls.push(1); return stop(); }
+      return "";
+    },
+  });
+  return { ...fp, stopCalls };
+}
+
+test("a settle while channels.tools holds mail skips the drain: the channel's own turn comes first", async () => {
+  const { fire, fireBus, sent, stopCalls } = coordinatedHarness();
+  await fire("session_start", { reason: "startup" });
+  await fire("agent_start");
+  await fireBus("channels:pending", { sessionId: "sess-1", count: 1 });
+  await fire("agent_settled");
+  assert.equal(stopCalls.length, 0, "no drain while the channel is about to deliver");
+  assert.equal(sent.length, 0, "no stale reminder queued behind the channel's turn");
+});
+
+test("a settle after channels.tools delivered skips the drain, whichever settle handler ran first", async () => {
+  const { fire, fireBus, sent, stopCalls } = coordinatedHarness();
+  await fire("session_start", { reason: "startup" });
+  await fire("agent_start");
+  await fireBus("channels:pending", { sessionId: "sess-1", count: 1 });
+  // channels.tools' settle handler ran before ours: it delivered and reset its hold.
+  await fireBus("channels:delivered", { sessionId: "sess-1" });
+  await fireBus("channels:pending", { sessionId: "sess-1", count: 0 });
+  await fire("agent_settled");
+  assert.equal(stopCalls.length, 0);
+  assert.equal(sent.length, 0);
+});
+
+test("the settle after the channel's turn drains again against fresh bus state", async () => {
+  const { fire, fireBus, sent, stopCalls } = coordinatedHarness();
+  await fire("session_start", { reason: "startup" });
+  await fire("agent_start");
+  await fireBus("channels:delivered", { sessionId: "sess-1" });
+  await fireBus("channels:pending", { sessionId: "sess-1", count: 0 });
+  await fire("agent_settled"); // skipped
+  await fire("agent_start"); // the channel's turn
+  await fire("agent_settled");
+  assert.equal(stopCalls.length, 1, "the next settle drains");
+  assert.equal(sent.length, 1, "and reminds if mail is still unread");
+});
+
+test("announcements from another session on the same bus are ignored", async () => {
+  const { fire, fireBus, sent, stopCalls } = coordinatedHarness();
+  await fire("session_start", { reason: "startup" });
+  await fire("agent_start");
+  await fireBus("channels:pending", { sessionId: "child-session", count: 3 });
+  await fireBus("channels:delivered", { sessionId: "child-session" });
+  await fire("agent_settled");
+  assert.equal(stopCalls.length, 1);
+  assert.equal(sent.length, 1);
+});
+
+test("with nothing held or delivered by the channel the drain runs as before", async () => {
+  const { fire, fireBus, sent, stopCalls } = coordinatedHarness();
+  await fire("session_start", { reason: "startup" });
+  await fire("agent_start");
+  await fireBus("channels:pending", { sessionId: "sess-1", count: 0 });
+  await fire("agent_settled");
+  assert.equal(stopCalls.length, 1);
+  assert.equal(sent.length, 1);
 });

@@ -53,6 +53,22 @@ speak this protocol.
 - A server that crashes is retried with backoff; its tools re-register on
   reconnect. A misbehaving or non-conforming process is killed and logged.
 
+## Coordinating with pi-tmux-bridge
+
+[pi-tmux-bridge](../pi-tmux-bridge) runs muster's Stop hook on every settle and
+starts a turn when mail is unread. pi queues every turn requested during a
+settle and runs them in order, so when both extensions start one for the same
+mail, the second turn is stale. To let pi-tmux-bridge stand down, this
+extension announces on `pi.events`:
+
+| Channel | Payload | When |
+|---|---|---|
+| `channels:pending` | `{ sessionId, count }` | the number of held events changes (arrival mid-turn, flush at settle, session start) |
+| `channels:delivered` | `{ sessionId }` | an event was delivered as a turn (never in a one-shot run) |
+
+`sessionId` is the session that loaded this instance, so a child session
+sharing the bus is not mistaken for its parent.
+
 ## The protocol
 
 A channel server is a subprocess speaking **newline-delimited JSON-RPC 2.0

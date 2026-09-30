@@ -115,9 +115,42 @@ export function createHarness(pi: any, deps: Deps = {}): void {
     clearPermissionAttention(t);
   }));
 
+  // Coordination with channels.tools (README, "Coordinating with
+  // channels.tools"). Every turn an extension requests during agent_settled is
+  // queued by pi and run in order after the settle, and pi's idle and pending
+  // checks cannot see that queue. So when channels.tools delivered mail at a
+  // settle, our drain reminder, computed BEFORE the channel's turn, ran as a
+  // second turn AFTER it: a stale "you have unread mail" for mail the agent
+  // had just read. channels.tools announces what it holds and what it
+  // delivers; on a settle where it is starting a turn we skip the drain, and
+  // the settle after that turn drains against fresh bus state. Checking both
+  // announcements covers either settle-handler order: held mail means it has
+  // not delivered yet, a delivery since agent_start means it already has.
+  // Scoped to this session's id: a child session may share the bus.
+  let ownSessionId: string | undefined;
+  let channelHeld = 0;
+  let channelDelivered = false;
+
+  pi.events?.on?.("channels:pending", (data: any) => safe(() => {
+    if (!ownSessionId || data?.sessionId !== ownSessionId) return;
+    channelHeld = Number(data?.count) || 0;
+  }));
+
+  pi.events?.on?.("channels:delivered", (data: any) => safe(() => {
+    if (!ownSessionId || data?.sessionId !== ownSessionId) return;
+    channelDelivered = true;
+  }));
+
+  pi.on("agent_start", () => safe(() => {
+    channelDelivered = false;
+  }));
+
   pi.on("session_start", (event: any, ctx: any) => safe(() => {
     if (!ownsPane(ctx)) return;
     ownsThisPane = true;
+    ownSessionId = String(ctx.sessionManager.getSessionId());
+    channelHeld = 0;
+    channelDelivered = false;
     const t = getTmux();
     if (!t) return;
     const rawSessionId = String(ctx.sessionManager.getSessionId());
@@ -173,6 +206,12 @@ export function createHarness(pi: any, deps: Deps = {}): void {
     // try/catch keeps it best-effort, and the enclosing safe() is a backstop —
     // a failed attention flag must not lose this settle's drain.
     raiseAttention(t);
+    if (channelHeld > 0 || channelDelivered) {
+      // channels.tools is starting a turn from this settle; we did not inject,
+      // so the settle that turn produces is not ours to guard.
+      stopHookActive = false;
+      return;
+    }
     const sessionId = String(ctx.sessionManager.getSessionId());
     const wasStopHookActive = stopHookActive;
     const out = drain({ sessionId, stopHookActive: wasStopHookActive, ...musterDeps });
