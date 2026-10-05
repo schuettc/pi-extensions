@@ -5,3 +5,7 @@ node_modules/
 # SDD design docs (plans/specs) — kept local, not committed
 docs/superpowers/
 .superpowers/
+
+# Design docs never live in this public repo: specs and plans are in private tools-ops (docs/<repo>/).
+docs/specs/
+docs/plans/
