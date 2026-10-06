@@ -11,15 +11,31 @@
  *  - when the agent settles (its turn ends), `casebook settled` tells casebook
  *    serve, so page messages that queued behind the turn go out.
  *  - `casebook session-info` tells casebook serve the session's name (so the
- *    page can say which session it belongs to) and whether pi marks it a
- *    child session (so the page can leave pi-subagents workers out): at
- *    session start, on every rename, and at each turn's end (serve may have
- *    been down at the last one).
+ *    page can say which session it belongs to) and its parent session (so
+ *    the page can leave pi-subagents workers out): at session start, on
+ *    every rename, and at each turn's end (serve may have been down at the
+ *    last one). When pi replaces the session in its process (/fork, /new,
+ *    /resume) or quits, it says the session ended.
  *
  * Inert when the casebook binary is missing. Never blocks, throws or prints.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { brief, installed, casebookBin, mentionsGit, record, settled, syncInBackground, extractCasebookDeliveries, sessionFacts, sessionInfo, type SessionSource } from "./casebook.ts";
+import {
+  brief,
+  installed,
+  casebookBin,
+  mentionsGit,
+  record,
+  settled,
+  syncInBackground,
+  extractCasebookDeliveries,
+  sessionFacts,
+  sessionInfo,
+  sessionEnded,
+  sessionIdFromFile,
+  processSessions,
+  type SessionSource,
+} from "./casebook.ts";
 
 export default function casebook(pi: ExtensionAPI) {
   const bin = casebookBin();
@@ -31,13 +47,24 @@ export default function casebook(pi: ExtensionAPI) {
   // The session manager pi handed this session; read again at each report,
   // so the name sent is always the current one.
   let sessionManager: SessionSource | undefined;
-  const reportInfo = () => sessionInfo(bin, sessionFacts(sessionManager, cwd));
+  const reportInfo = () => {
+    const facts = sessionFacts(sessionManager, cwd);
+    if (facts && !processSessions().has(facts.id)) processSessions().set(facts.id, { root: !facts.parent });
+    sessionInfo(bin, facts);
+  };
 
   pi.on("session_start", (event, ctx) => {
     cwd = ctx.cwd ?? process.cwd();
     sessionManager = ctx.sessionManager as SessionSource | undefined;
     sessionId = String(ctx.sessionManager?.getSessionId?.() ?? "");
     briefed = false;
+    // pi replaced the previous session in this process (/fork, /new,
+    // /resume): it ended. Its own shutdown says so too; this covers a
+    // shutdown report that was lost.
+    if (event.reason === "fork" || event.reason === "new" || event.reason === "resume") {
+      const previous = sessionIdFromFile(event.previousSessionFile);
+      if (previous && previous !== sessionId) sessionEnded(bin, previous);
+    }
     reportInfo();
     if (event.reason !== "reload") syncInBackground(bin);
   });
@@ -95,5 +122,11 @@ export default function casebook(pi: ExtensionAPI) {
     reportInfo();
   });
 
-  pi.on("session_shutdown", () => syncInBackground(bin));
+  pi.on("session_shutdown", (event) => {
+    processSessions().delete(sessionId);
+    // The session ends unless pi is only reloading this runtime (the same
+    // session starts again at once).
+    if (event?.reason !== "reload") sessionEnded(bin, sessionId);
+    syncInBackground(bin);
+  });
 }
