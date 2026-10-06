@@ -93,6 +93,70 @@ export function extractCasebookDeliveries(text: string): number[] {
   return result;
 }
 
+/**
+ * What casebook serve is told about a pi session beyond the channel's
+ * presence: its name (pi's session name; "" when it has none) and whether
+ * pi marks it a child session. pid is pi's own process: the channel reports
+ * the same one (its parent), and pi-subagents runs worker sessions inside
+ * the parent's pi process, so serve calls a child that shares a live
+ * session's process a worker. A fork also names a parentSession, but runs
+ * in a pi process of its own, so it stays a top-level session.
+ */
+export interface SessionFacts {
+  id: string;
+  name: string;
+  cwd: string;
+  pid: number;
+  child: boolean;
+}
+
+/** The slice of pi's ReadonlySessionManager sessionFacts reads. */
+export interface SessionSource {
+  getSessionId(): string;
+  getSessionName?(): string | undefined;
+  getSessionFile?(): string | undefined;
+  getHeader?(): { parentSession?: string } | null;
+}
+
+/**
+ * The session's facts, or undefined when pi's session manager can't say.
+ * child: pi-subagents writes parentSession into a persisted worker's header,
+ * and an in-memory worker has no session file at all.
+ */
+export function sessionFacts(sm: SessionSource | undefined, cwd: string, pid: number = process.pid): SessionFacts | undefined {
+  try {
+    if (!sm) return undefined;
+    const id = String(sm.getSessionId?.() ?? "");
+    if (!id) return undefined;
+    const name = String(sm.getSessionName?.() ?? "");
+    const file = sm.getSessionFile?.();
+    const parent = sm.getHeader?.()?.parentSession;
+    return { id, name, cwd, pid, child: !!parent || !file };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The `casebook session-info` command line for facts. */
+export function sessionInfoArgs(f: SessionFacts): string[] {
+  const args = ["session-info", "--harness", "pi", "--session", f.id, "--name", f.name, "--cwd", f.cwd, "--pid", String(f.pid)];
+  if (f.child) args.push("--child");
+  return args;
+}
+
+/** Tell casebook serve a session's name and child mark. Fire-and-forget;
+ * casebook never starts serve for it. */
+export function sessionInfo(bin: string, facts: SessionFacts | undefined): void {
+  if (!facts) return;
+  try {
+    const child = spawn(bin, sessionInfoArgs(facts), { stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    // never fail the session
+  }
+}
+
 /** Start `casebook sync --no-github` detached. */
 export function syncInBackground(bin: string): void {
   try {

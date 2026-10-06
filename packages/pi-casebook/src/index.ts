@@ -10,11 +10,16 @@
  *    background; the 30-minute launchd job does the GitHub refresh.
  *  - when the agent settles (its turn ends), `casebook settled` tells casebook
  *    serve, so page messages that queued behind the turn go out.
+ *  - `casebook session-info` tells casebook serve the session's name (so the
+ *    page can say which session it belongs to) and whether pi marks it a
+ *    child session (so the page can leave pi-subagents workers out): at
+ *    session start, on every rename, and at each turn's end (serve may have
+ *    been down at the last one).
  *
  * Inert when the casebook binary is missing. Never blocks, throws or prints.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { brief, installed, casebookBin, mentionsGit, record, settled, syncInBackground, extractCasebookDeliveries } from "./casebook.ts";
+import { brief, installed, casebookBin, mentionsGit, record, settled, syncInBackground, extractCasebookDeliveries, sessionFacts, sessionInfo, type SessionSource } from "./casebook.ts";
 
 export default function casebook(pi: ExtensionAPI) {
   const bin = casebookBin();
@@ -23,13 +28,22 @@ export default function casebook(pi: ExtensionAPI) {
   let sessionId = "";
   let briefed = false;
   const shownDeliveries = new Set<number>();
+  // The session manager pi handed this session; read again at each report,
+  // so the name sent is always the current one.
+  let sessionManager: SessionSource | undefined;
+  const reportInfo = () => sessionInfo(bin, sessionFacts(sessionManager, cwd));
 
   pi.on("session_start", (event, ctx) => {
     cwd = ctx.cwd ?? process.cwd();
+    sessionManager = ctx.sessionManager as SessionSource | undefined;
     sessionId = String(ctx.sessionManager?.getSessionId?.() ?? "");
     briefed = false;
+    reportInfo();
     if (event.reason !== "reload") syncInBackground(bin);
   });
+
+  // Court renamed the session (pi's /name): the page shows the new name.
+  pi.on("session_info_changed", () => reportInfo());
 
   pi.on("tool_result", (event) => {
     if (event.toolName !== "bash") return;
@@ -78,6 +92,7 @@ export default function casebook(pi: ExtensionAPI) {
     const shown = shownDeliveries.size > 0 ? [...shownDeliveries].sort((a, b) => a - b) : undefined;
     shownDeliveries.clear();
     settled(bin, sessionId, shown);
+    reportInfo();
   });
 
   pi.on("session_shutdown", () => syncInBackground(bin));
