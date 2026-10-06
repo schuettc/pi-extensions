@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mentionsGit, recordPayload, childEnv, sessionFacts, sessionInfoArgs, sessionEndedArgs, sessionIdFromFile, type ProcessSessions } from "./casebook.ts";
+import { mentionsGit, recordPayload, childEnv, sessionFacts, sessionInfoArgs, sessionEndedArgs, sessionIdFromFile, registerSession, type ProcessSessions } from "./casebook.ts";
 
 test("mentionsGit spots git and gh invocations only", () => {
   for (const c of ["git push", "cd x && git commit -m 'a'", "gh pr merge 3", "/usr/bin/git fetch", "FOO=1 gh api x", "(git status)"]) {
@@ -79,6 +79,24 @@ test("sessionFacts: an in-memory session with no header parent runs under the pr
   assert.equal(sessionFacts(sm({ id: "main" }), "/w", 1, procs)?.parent, "");
   // A session with a file and no parentSession is a root, whatever else runs.
   assert.equal(sessionFacts(sm({ id: "f", file: "/s/f.jsonl" }), "/w", 1, procs)?.parent, "");
+});
+
+test("registerSession: a fork registered first is its process's root, so its in-memory subagents find it", () => {
+  const procs: ProcessSessions = new Map();
+  // The fork names a parent in its header but runs first in its own process.
+  registerSession(procs, "fork");
+  registerSession(procs, "w1");
+  assert.equal(procs.get("fork")?.root, true);
+  assert.equal(procs.get("w1")?.root, false);
+  assert.equal(sessionFacts(sm({ id: "mem" }), "/w", 1, procs)?.parent, "fork");
+  // Registering again changes nothing.
+  registerSession(procs, "fork");
+  assert.equal(procs.get("fork")?.root, true);
+  // Once the root has ended (deleted), the next session pi starts is the root.
+  procs.delete("fork");
+  procs.delete("w1");
+  registerSession(procs, "next");
+  assert.equal(procs.get("next")?.root, true);
 });
 
 test("sessionFacts: no name is empty, and a broken session manager yields nothing", () => {

@@ -137,6 +137,18 @@ export function processSessions(): ProcessSessions {
 }
 
 /**
+ * Records a session in this process's registry, once. The first session
+ * registered while no root is live is the process's root: the session pi
+ * runs at top level. A fork names a parent in its header, yet it is still the
+ * root of its own process, so in-memory subagents it spawns find it.
+ */
+export function registerSession(procs: ProcessSessions, id: string): void {
+  if (procs.has(id)) return;
+  const rootLive = [...procs.values()].some((s) => s.root);
+  procs.set(id, { root: !rootLive });
+}
+
+/**
  * The session id a pi session file belongs to: pi names files
  * `<timestamp>_<id>.jsonl` (the timestamp has no underscore); a file named
  * otherwise is read for its header's id. "" when neither says.

@@ -34,6 +34,7 @@ import {
   sessionEnded,
   sessionIdFromFile,
   processSessions,
+  registerSession,
   type SessionSource,
 } from "./casebook.ts";
 
@@ -49,7 +50,7 @@ export default function casebook(pi: ExtensionAPI) {
   let sessionManager: SessionSource | undefined;
   const reportInfo = () => {
     const facts = sessionFacts(sessionManager, cwd);
-    if (facts && !processSessions().has(facts.id)) processSessions().set(facts.id, { root: !facts.parent });
+    if (facts) registerSession(processSessions(), facts.id);
     sessionInfo(bin, facts);
   };
 
