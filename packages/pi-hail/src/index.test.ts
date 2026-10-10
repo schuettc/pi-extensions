@@ -59,6 +59,8 @@ function makeFakePi() {
       },
     },
     sendUserMessage: (t: string) => sendUserMessage(t),
+    // pi's own idle check: idle by default so phone prompts inject.
+    isIdle: () => true,
     registerCommand: () => {},
   };
   return {

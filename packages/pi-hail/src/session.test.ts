@@ -128,8 +128,20 @@ test("prompt during local_turn is refused with reason turn_running", () => {
   assert.equal(deps.sendUserMessage.calls.length, 0);
 });
 
+// Guards: a phone prompt arriving while pi itself is NOT idle (streaming) is
+// refused via pi's own idle check — the same turn_running path — so { accepted }
+// is never a false positive even when pi-hail's phase looks idle. No echo tag.
+test("prompt while pi is not idle is refused turn_running, sendUserMessage never called", () => {
+  const deps = fakeDeps();
+  deps.isIdle = () => false;
+  const s = new Session(deps);
+  s.onInbound({ prompt: { text: "hi", from: "p1", requestId: "r1" } });
+  assert.deepEqual(lastSend(deps), { refused: { requestId: "r1", reason: "turn_running" } });
+  assert.equal(deps.sendUserMessage.calls.length, 0);
+});
+
 // Guards (D2'): an injected phone prompt is acknowledged — { accepted:{requestId} }
-// after sendUserMessage returns.
+// after sendUserMessage returns. pi reports idle, so injection proceeds.
 test("an injected phone prompt replies { accepted:{requestId} }", () => {
   const deps = fakeDeps();
   const s = new Session(deps);

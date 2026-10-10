@@ -44,12 +44,15 @@ export function fakeDeps() {
     };
     answerPrompt: typeof answerPrompt;
     getEntries: typeof getEntries;
+    isIdle: () => boolean;
   } = {
     send,
     sendUserMessage,
     ui: { setStatus, notify, holdInput },
     answerPrompt,
     getEntries,
+    // pi's own idle check (default idle so prompts inject); tests flip to false.
+    isIdle: () => true,
   };
   return deps;
 }

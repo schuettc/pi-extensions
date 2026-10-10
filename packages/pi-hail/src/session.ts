@@ -87,6 +87,14 @@ export interface SessionDeps {
   send: (obj: unknown) => void;
   /** pi.sendUserMessage */
   sendUserMessage: (text: string) => void;
+  /**
+   * pi's own idle check (pi.isIdle()). pi's sendUserMessage returns void and
+   * swallows its own busy rejection, so a phone prompt injected while pi is
+   * streaming would still reply { accepted } \u2014 a false positive. Consult this
+   * BEFORE injecting: if pi is not idle, refuse via the same turn_running path.
+   * Absent (older wiring) means assume idle.
+   */
+  isIdle?: () => boolean;
   ui: {
     setStatus: (text: string | undefined) => void;
     notify: (msg: string, level?: "info" | "warning" | "error") => void;
@@ -467,7 +475,12 @@ export class Session {
     if (m == null || typeof m !== "object") return;
     if ("prompt" in m) {
       const prompt = m.prompt as { text: string; from: string; requestId: string };
-      if (this.phase === "local_turn") {
+      // Refuse when a turn is already running — whether pi-hail knows it owns a
+      // local turn, OR pi itself reports it is not idle (still streaming). pi's
+      // sendUserMessage returns void and swallows its own busy rejection, so
+      // without this check an { accepted } reply could be a false positive. One
+      // refusal path, not two.
+      if (this.phase === "local_turn" || this.deps.isIdle?.() === false) {
         // The person owns the turn; refuse rather than drop or queue (spec §4).
         this.sendBoundary({ refused: { requestId: prompt.requestId, reason: "turn_running" } });
         return;

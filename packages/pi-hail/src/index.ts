@@ -296,6 +296,11 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         canSendProgress: () => socket?.canSendProgress() ?? false,
         onDrain: (cb) => socket?.onDrain(cb),
         sendUserMessage: (text) => pi.sendUserMessage(text),
+        // pi's own idle check (muster): sendUserMessage swallows its busy
+        // rejection, so a prompt injected mid-stream would falsely reply
+        // { accepted }. The Session consults this before injecting and refuses
+        // turn_running when pi is not idle.
+        isIdle: () => pi.isIdle(),
         ui: {
           setStatus: (text) => c.ui.setStatus("pi-hail", text),
           notify: (msg, level) => c.ui.notify(msg, level ?? "info"),

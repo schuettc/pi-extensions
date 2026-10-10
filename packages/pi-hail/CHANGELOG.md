@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0
+
+- **Busy prompts are refused via pi's idle check.** Before injecting a phone
+  prompt, pi-hail now calls pi's `isIdle()`. If pi is not idle (still
+  streaming), the prompt is refused on the existing `turn_running` path instead
+  of being injected. pi's `sendUserMessage` returns void and swallows its own
+  busy rejection, so without this check an `{ accepted }` reply could be a false
+  positive; now `accepted` is never a false positive. No echo tag.
+
 ## 0.7.0
 
 Pane lifecycle and single ownership (spec `2026-09-28-pane-lifecycle-and-single-owner-design`).
