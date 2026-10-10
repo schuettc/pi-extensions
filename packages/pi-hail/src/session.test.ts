@@ -130,7 +130,7 @@ test("prompt during local_turn is refused with reason turn_running", () => {
 
 // Guards: a phone prompt arriving while pi itself is NOT idle (streaming) is
 // refused via pi's own idle check — the same turn_running path — so { accepted }
-// is never a false positive even when pi-hail's phase looks idle. No echo tag.
+// is not a false positive when pi is busy at the moment of injection (pi's own preflight window remains a gap). No echo tag.
 test("prompt while pi is not idle is refused turn_running, sendUserMessage never called", () => {
   const deps = fakeDeps();
   deps.isIdle = () => false;

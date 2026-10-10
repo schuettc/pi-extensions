@@ -88,7 +88,7 @@ export interface SessionDeps {
   /** pi.sendUserMessage */
   sendUserMessage: (text: string) => void;
   /**
-   * pi's own idle check (pi.isIdle()). pi's sendUserMessage returns void and
+   * pi's own idle check (ctx.isIdle()). pi's sendUserMessage returns void and
    * swallows its own busy rejection, so a phone prompt injected while pi is
    * streaming would still reply { accepted } \u2014 a false positive. Consult this
    * BEFORE injecting: if pi is not idle, refuse via the same turn_running path.
