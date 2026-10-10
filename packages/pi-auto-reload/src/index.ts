@@ -10,9 +10,14 @@
 // no `input` event) and hands the handler a command context with reload().
 // In the TUI that is the same code path as typing /reload, which refuses while
 // a response is streaming or compacting.
-import { readFileSync, statSync } from "node:fs";
+//
+// It also watches the executables of the channel servers channels.tools
+// spawns (casebook, muster, ...). channels.tools starts them once per session,
+// so after their binaries are upgraded a session keeps running the old ones;
+// a reload closes them and starts fresh ones from the new binaries.
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const RELOAD_COMMAND = "auto-reload-now";
@@ -60,6 +65,54 @@ export function packagesFingerprint(agentDir: string, extraFiles: readonly strin
   return parts.join("\n");
 }
 
+function readChannelServers(file: string): Record<string, { command: string; cwd?: string }> {
+  try {
+    const servers = (JSON.parse(readFileSync(file, "utf8")) as { channelServers?: unknown }).channelServers;
+    if (typeof servers !== "object" || servers === null) return {};
+    const out: Record<string, { command: string; cwd?: string }> = {};
+    for (const [name, def] of Object.entries(servers as Record<string, { command?: unknown; cwd?: unknown }>)) {
+      if (typeof def?.command !== "string" || def.command === "") continue;
+      out[name] = { command: def.command, ...(typeof def.cwd === "string" ? { cwd: def.cwd } : {}) };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function isExecutable(file: string): boolean {
+  try {
+    accessSync(file, constants.X_OK);
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// The executable each configured channel server runs, resolved the way
+// spawn() resolves it: a bare name is looked up on PATH, a path is taken
+// relative to the server's cwd. Reads the same two files as channels.tools'
+// loadChannelConfig, with the project file overriding the global one by name.
+// A command that resolves to nothing is skipped; once it is installed, the
+// list itself changes.
+export function channelServerExecutables(opts: { home: string; cwd: string; path: string }): string[] {
+  const servers = {
+    ...readChannelServers(join(opts.home, ".pi", "agent", "channels.json")),
+    ...readChannelServers(join(opts.cwd, ".pi", "channels.json")),
+  };
+  const found: string[] = [];
+  for (const def of Object.values(servers)) {
+    if (def.command.includes("/")) {
+      const file = isAbsolute(def.command) ? def.command : resolve(opts.cwd, def.cwd ?? "", def.command);
+      if (isExecutable(file)) found.push(file);
+      continue;
+    }
+    const file = opts.path.split(delimiter).filter(Boolean).map((dir) => join(dir, def.command)).find(isExecutable);
+    if (file) found.push(file);
+  }
+  return found;
+}
+
 export interface AutoReloadDeps {
   fingerprint?: () => string;
   pollMs?: number;
@@ -72,7 +125,11 @@ export function createAutoReload(pi: ExtensionAPI, deps: AutoReloadDeps = {}): v
   // triggers a reload, which makes the behavior easy to test.
   const extra = (process.env.PI_AUTO_RELOAD_EXTRA ?? "").split(",").filter(Boolean);
   const agentDir = resolveAgentDir();
-  const fingerprint = deps.fingerprint ?? (() => packagesFingerprint(agentDir, extra));
+  let cwd = process.cwd();
+  const fingerprint = deps.fingerprint ?? (() => packagesFingerprint(agentDir, [
+    ...extra,
+    ...channelServerExecutables({ home: homedir(), cwd, path: process.env.PATH ?? "" }),
+  ]));
   const pollMs = deps.pollMs ?? 15_000;
   const every = deps.setInterval ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
   const stop = deps.clearInterval ?? ((handle: unknown) => clearInterval(handle as NodeJS.Timeout));
@@ -102,7 +159,7 @@ export function createAutoReload(pi: ExtensionAPI, deps: AutoReloadDeps = {}): v
     try { current = fingerprint(); } catch { return; }
     if (current === baseline) return;
     pending = true;
-    try { ctxRef?.ui.setStatus(STATUS_KEY, "packages updated · reloading when idle"); } catch { /* stale */ }
+    try { ctxRef?.ui.setStatus(STATUS_KEY, "update installed · reloading when idle"); } catch { /* stale */ }
   };
 
   const tick = (): void => { check(); tryReload(); };
@@ -116,6 +173,7 @@ export function createAutoReload(pi: ExtensionAPI, deps: AutoReloadDeps = {}): v
 
   pi.on("session_start", (_event, ctx) => {
     ctxRef = ctx;
+    cwd = ctx.cwd ?? cwd;
     try { baseline = fingerprint(); } catch { baseline = undefined; }
     pending = false;
     triggered = false;

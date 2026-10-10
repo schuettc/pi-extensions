@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createAutoReload, npmPackageName, packagesFingerprint, RELOAD_COMMAND } from "./index.ts";
+import { channelServerExecutables, createAutoReload, npmPackageName, packagesFingerprint, RELOAD_COMMAND } from "./index.ts";
 
 test("npmPackageName strips versions, keeps scopes, ignores non-npm specs", () => {
   assert.equal(npmPackageName("npm:@schuettc/pi-auto-review@0.20.0-schuettc.3"), "@schuettc/pi-auto-review");
@@ -37,6 +37,48 @@ test("the fingerprint changes when a package is updated or the list changes", ()
   settings(["npm:@x/a@1.1.0", "npm:b", "npm:c"]);
   assert.notEqual(packagesFingerprint(dir), before, "a package list change changes it");
   assert.match(packagesFingerprint(dir), /c:missing/);
+});
+
+test("channel server executables come from both channels.json files, found on PATH", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-auto-reload-channels-"));
+  const home = join(root, "home");
+  const cwd = join(root, "project");
+  const bin1 = join(root, "bin1");
+  const bin2 = join(root, "bin2");
+  for (const dir of [join(home, ".pi", "agent"), join(cwd, ".pi"), bin1, bin2]) mkdirSync(dir, { recursive: true });
+  const exe = (path: string) => { writeFileSync(path, "#!/bin/sh\n"); chmodSync(path, 0o755); };
+  exe(join(bin1, "casebook"));
+  exe(join(bin2, "casebook"));
+  exe(join(bin2, "muster"));
+  writeFileSync(join(bin1, "muster"), "not executable");
+  exe(join(root, "local-server"));
+  writeFileSync(join(home, ".pi", "agent", "channels.json"), JSON.stringify({ channelServers: {
+    casebook: { command: "casebook", args: ["channel"] },
+    muster: { command: "muster", args: ["channel"] },
+    gone: { command: "not-installed" },
+  } }));
+  writeFileSync(join(cwd, ".pi", "channels.json"), JSON.stringify({ channelServers: {
+    muster: { command: join(root, "local-server") },
+  } }));
+  const path = [bin1, bin2].join(":");
+  assert.deepEqual(channelServerExecutables({ home, cwd, path }), [
+    join(bin1, "casebook"),
+    join(root, "local-server"),
+  ], "first executable on PATH wins, the project file overrides the global one by name, unresolved commands are skipped");
+  assert.deepEqual(channelServerExecutables({ home, cwd: join(root, "elsewhere"), path }), [
+    join(bin1, "casebook"),
+    join(bin2, "muster"),
+  ], "a non-executable file on PATH is passed over");
+});
+
+test("the fingerprint changes when a channel server binary is replaced", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-auto-reload-"));
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ packages: [] }));
+  const binary = join(dir, "casebook");
+  writeFileSync(binary, "v1");
+  const before = packagesFingerprint(dir, [binary]);
+  utimesSync(binary, new Date(), new Date(Date.now() + 5_000));
+  assert.notEqual(packagesFingerprint(dir, [binary]), before);
 });
 
 function harness(opts: { idle?: boolean; pending?: boolean } = {}) {

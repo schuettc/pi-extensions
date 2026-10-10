@@ -1,6 +1,6 @@
 {
   "name": "pi-auto-reload",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Reload a pi session automatically, when idle, after the installed pi packages change (e.g. after kempt update or pi update).",
   "type": "module",
   "license": "MIT",
