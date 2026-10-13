@@ -248,6 +248,9 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
       const c = ctx as {
         cwd: string;
         sessionManager: { getSessionId: () => unknown; getEntries?: () => unknown[] };
+        // pi's own idle check lives on the ExtensionContext (dist/core/extensions
+        // /types.d.ts: isIdle(): boolean), NOT on the ExtensionAPI (`pi`).
+        isIdle: () => boolean;
         ui: {
           setStatus: (key: string, text: string | undefined) => void;
           notify: (msg: string, level: "info" | "warning" | "error") => void;
@@ -296,6 +299,12 @@ export function createExtension(pi: any, deps: ExtensionDeps = {}): void {
         canSendProgress: () => socket?.canSendProgress() ?? false,
         onDrain: (cb) => socket?.onDrain(cb),
         sendUserMessage: (text) => pi.sendUserMessage(text),
+        // pi's own idle check (muster): sendUserMessage swallows its busy
+        // rejection, so a prompt injected mid-stream would falsely reply
+        // { accepted }. The Session consults this before injecting and refuses
+        // turn_running when pi is not idle. isIdle() is a method of the
+        // ExtensionContext (`c`), not the ExtensionAPI (`pi`).
+        isIdle: () => c.isIdle(),
         ui: {
           setStatus: (text) => c.ui.setStatus("pi-hail", text),
           notify: (msg, level) => c.ui.notify(msg, level ?? "info"),

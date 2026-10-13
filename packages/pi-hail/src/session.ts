@@ -87,6 +87,14 @@ export interface SessionDeps {
   send: (obj: unknown) => void;
   /** pi.sendUserMessage */
   sendUserMessage: (text: string) => void;
+  /**
+   * pi's own idle check (ctx.isIdle()). pi's sendUserMessage returns void and
+   * swallows its own busy rejection, so a phone prompt injected while pi is
+   * streaming would still reply { accepted } \u2014 a false positive. Consult this
+   * BEFORE injecting: if pi is not idle, refuse via the same turn_running path.
+   * Absent (older wiring) means assume idle.
+   */
+  isIdle?: () => boolean;
   ui: {
     setStatus: (text: string | undefined) => void;
     notify: (msg: string, level?: "info" | "warning" | "error") => void;
@@ -467,7 +475,12 @@ export class Session {
     if (m == null || typeof m !== "object") return;
     if ("prompt" in m) {
       const prompt = m.prompt as { text: string; from: string; requestId: string };
-      if (this.phase === "local_turn") {
+      // Refuse when a turn is already running — whether pi-hail knows it owns a
+      // local turn, OR pi itself reports it is not idle (still streaming). pi's
+      // sendUserMessage returns void and swallows its own busy rejection, so
+      // without this check an { accepted } reply could be a false positive. One
+      // refusal path, not two.
+      if (this.phase === "local_turn" || this.deps.isIdle?.() === false) {
         // The person owns the turn; refuse rather than drop or queue (spec §4).
         this.sendBoundary({ refused: { requestId: prompt.requestId, reason: "turn_running" } });
         return;
@@ -517,8 +530,8 @@ export class Session {
       return;
     }
     if ("resend" in m) {
-      const resend = m.resend as { since?: number; limit?: number };
-      this.onResend(resend.since ?? 0, resend.limit ?? 0);
+      const resend = m.resend as { since?: number; limit?: number; claim?: string };
+      this.onResend(resend.since ?? 0, resend.limit ?? 0, resend.claim);
       return;
     }
     if ("answer" in m) {
@@ -614,16 +627,30 @@ export class Session {
    * cursor of the last skipped frame, so the daemon's stored cursor advances
    * past the whole skipped range. `limit` 0 (or absent) is uncapped \u2014 today's
    * behavior, no marker.
+   *
+   * The daemon's resend carries an opaque `claim` (decided 2026-10-13). pi-hail
+   * echoes it unchanged as a sibling on every frame it replays for this request
+   * and on the terminal done \u2014 the daemon reads it and forwards only `event`. A
+   * resend WITHOUT a claim is a protocol error: pi-hail logs a diag and still
+   * answers done (without a claim) so the daemon is answered when the socket is alive (otherwise its backstop ends the claim). The daemon
+   * requires 0.8.0, so this never happens in the release.
    */
-  onResend(since: number, limit = 0): void {
+  onResend(since: number, limit = 0, claim?: string): void {
     if (!this.isActive) return;
+    if (claim === undefined) {
+      this.sendBoundary({
+        diag: { where: "session.onResend", message: "resend without claim" },
+      });
+      this.sendBoundary({ resend: "done" });
+      return;
+    }
     // Reading entries can throw on a torn-down/stale context; the catch-up must
-    // still end so the daemon never waits forever (spec D1').
+    // still end on a live socket (the daemon's backstop covers a dead one; spec D1').
     let trimmed: ReturnType<typeof trimFrames>;
     try {
       trimmed = trimFrames(entriesAfter(this.deps.getEntries(), since), limit);
     } catch (err) {
-      this.sendBoundary({ resend: "done", error: errorMessage(err) });
+      this.sendBoundary({ resend: "done", error: errorMessage(err), claim });
       return;
     }
     const { kept, skipped, lastSkippedCursor } = trimmed;
@@ -632,12 +659,13 @@ export class Session {
         event: { type: "hail_history_trimmed", skipped },
         replay: true,
         cursor: lastSkippedCursor,
+        claim,
       });
     }
     for (const { event, cursor } of kept) {
-      this.sendBoundary({ event, replay: true, cursor });
+      this.sendBoundary({ event, replay: true, cursor, claim });
     }
-    this.sendBoundary({ resend: "done" });
+    this.sendBoundary({ resend: "done", claim });
   }
 
   /**

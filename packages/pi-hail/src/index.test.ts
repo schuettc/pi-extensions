@@ -83,6 +83,10 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       getEntries: () => [],
     },
     ui: { setStatus: spy<[string, unknown]>(), notify: spy<[string, unknown]>() },
+    // pi's own idle check lives on the ExtensionContext (types.d.ts isIdle(): boolean),
+    // NOT on the ExtensionAPI — mirror the real shape here. Idle by default so
+    // phone prompts inject; a test overrides it to model a busy pane.
+    isIdle: () => true,
     ...overrides,
   };
 }
