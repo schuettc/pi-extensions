@@ -7,7 +7,7 @@ import {
   raisePermissionAttention as raisePermissionAttentionDefault,
   clearPermissionAttention as clearPermissionAttentionDefault,
 } from "./bell.ts";
-import { sessionStart, drain, sessionEnd, become } from "./muster.ts";
+import { sessionStart, drain, sessionEnd, become, promptStart } from "./muster.ts";
 import type { Run } from "./muster.ts";
 
 type Deps = {
@@ -141,8 +141,13 @@ export function createHarness(pi: any, deps: Deps = {}): void {
     channelDelivered = true;
   }));
 
-  pi.on("agent_start", () => safe(() => {
+  pi.on("agent_start", (_event: unknown, ctx: any) => safe(() => {
     channelDelivered = false;
+    // Every turn starts here, including one channels.tools starts at a
+    // settle, so this marks the bus rows working for turns the user did not
+    // type. agent_settled's Stop hook marks them idle again.
+    if (!ownsPane(ctx)) return;
+    promptStart({ sessionId: String(ctx.sessionManager.getSessionId()), ...musterDeps });
   }));
 
   pi.on("session_start", (event: any, ctx: any) => safe(() => {
