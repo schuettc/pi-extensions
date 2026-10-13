@@ -9,6 +9,22 @@ A pi extension giving a running session two tools to pace itself — the pi anal
 
 Use it to re-check something without a human poking the session — a build that takes a few minutes, a remote queue, a rate-limit window — rather than busy-waiting.
 
+## Countdown
+
+While a wakeup is pending, the session shows a live countdown to the soonest one: `17:34 · 12m · <reason>` (local fire time, whole minutes left, a truncated reason). Under a minute reads `<1m`; a missing reason drops that segment; more than one pending appends ` · +N`. It re-renders every 30 s (an unref'd interval) and immediately on schedule / fire / cancel / delivery failure, and clears when nothing is pending or on shutdown.
+
+Where it shows is decided once at session start:
+
+- **tmux bar** — if this pane is inside tmux (`$TMUX` + `$TMUX_PANE`) *and* the server's global `status-left` / `status-right` already renders `@wakeup`, the countdown is written to the pane-session user option `@wakeup` (muster's `@muster_inbox` pattern) and nothing is drawn in the pi pane. Add this to your tmux `status-right` to render it:
+
+  ```tmux
+  set -g status-right '#{?@wakeup,⏰ #{@wakeup}  ,}'
+  ```
+
+- **above the editor** — otherwise (no tmux, or a config that doesn't render `@wakeup`), one line via `ctx.ui.setWidget("wakeup", …)` above the pi editor.
+
+Every tmux / UI call is best-effort: a failure in a timer callback is caught and logged, never thrown.
+
 ## Design
 
 - **Session-local.** A wakeup is an in-process `setTimeout`, not a cron job. It lives and dies with the session. This is deliberate: subagents and pacing in pi are in-process (the muster-teammate shape is shelved), and cross-session scheduling is a different product (`cron` + `pi -p`), not this tool.
