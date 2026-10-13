@@ -194,6 +194,19 @@ export function createWakeup(pi: any, deps: Deps = {}): void {
     }
   }
 
+  // The widget line matches the tmux bar: a clock and the theme's warning
+  // (yellow) colour, so it stands out above the editor. The theme read is
+  // guarded like every other ctx.ui access; without one the line is plain.
+  function widgetLine(text: string): string {
+    const line = `⏰ ${text}`;
+    try {
+      const theme = ctx?.ui?.theme;
+      return theme && typeof theme.fg === "function" ? theme.fg("warning", line) : line;
+    } catch {
+      return line;
+    }
+  }
+
   // Render the current pending list to the chosen target, or clear it when
   // nothing is pending. Runs inside timer/interval callbacks, so every tmux and
   // ctx.ui call is guarded — a throw here must never escape (best-effort).
@@ -214,7 +227,7 @@ export function createWakeup(pi: any, deps: Deps = {}): void {
       // Widget mode. Guard ctx.ui: a ctx captured at session_start goes stale
       // after /reload or a session switch, and setWidget would then throw.
       if (ctx?.ui?.setWidget) {
-        ctx.ui.setWidget("wakeup", text === undefined ? undefined : [text]);
+        ctx.ui.setWidget("wakeup", text === undefined ? undefined : [widgetLine(text)]);
       }
     } catch (error) {
       log(`display refresh failed: ${String(error)}`);
