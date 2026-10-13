@@ -92,16 +92,21 @@ test("formatCountdown: no reason omits that segment", () => {
   assert.equal(text, "17:34 \u00b7 12m");
 });
 
-test("formatCountdown: more pending appends +N, counted off the soonest", () => {
+test("formatCountdown: more pending appends +N with the others' times, soonest first", () => {
   const pending = [
     { fireAtMs: 300_000, reason: "later" },
     { fireAtMs: 0, reason: "soon" },
     { fireAtMs: 600_000, reason: "latest" },
   ];
   const text = formatCountdown(pending, -60_000, clock);
-  // Soonest (fireAtMs 0) drives the line; two others become +2.
-  assert.ok(text!.startsWith("17:34 \u00b7 1m \u00b7 soon"));
-  assert.ok(text!.endsWith("\u00b7 +2"));
+  // Soonest (fireAtMs 0) drives the line; the two others become +2 with their times.
+  assert.equal(text, "17:34 \u00b7 1m \u00b7 soon \u00b7 +2 [6m, 11m]");
+});
+
+test("formatCountdown: the others' times are capped, the rest shown as \u2026", () => {
+  const pending = [0, 300_000, 600_000, 900_000, 1_200_000].map((fireAtMs) => ({ fireAtMs, reason: "" }));
+  const text = formatCountdown(pending, -60_000, clock);
+  assert.equal(text, "17:34 \u00b7 1m \u00b7 +4 [6m, 11m, \u2026]");
 });
 
 test("formatCountdown: a long reason is truncated in the line", () => {

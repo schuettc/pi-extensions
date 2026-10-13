@@ -72,7 +72,9 @@ export function formatRemaining(remainingMs: number): string {
 
 // The countdown line for the soonest pending wakeup:
 //   `17:34 · 12m · <reason>`  (fire time, minutes remaining, truncated reason)
-// A missing reason drops that segment; more than one pending appends ` · +N`.
+// A missing reason drops that segment; more than one pending appends
+// ` · +N [6m, 11m]`, the others' minutes left, capped at MAX_OTHER_TIMES with
+// `…` for the rest.
 // Returns undefined when nothing is pending, so the caller clears the display.
 // The HH:MM formatter is injected so tests need not depend on the machine's TZ.
 export function formatCountdown(
@@ -88,9 +90,18 @@ export function formatCountdown(
   const reason = truncateReason(soonest.reason ?? "");
   if (reason) parts.push(reason);
   let text = parts.join(" · ");
-  if (sorted.length > 1) text += ` · +${sorted.length - 1}`;
+  const others = sorted.slice(1);
+  if (others.length > 0) {
+    const times = others.slice(0, MAX_OTHER_TIMES).map((w) => formatRemaining(w.fireAtMs - nowMs));
+    if (others.length > MAX_OTHER_TIMES) times.push("…");
+    text += ` · +${others.length} [${times.join(", ")}]`;
+  }
   return text;
 }
+
+// How many of the other pending wakeups list their time after `+N`; two keeps
+// the status bar to one short line.
+export const MAX_OTHER_TIMES = 2;
 
 // Where the countdown shows, decided ONCE at session_start. The tmux bar is
 // used only when this pane is inside tmux AND the server's global status line

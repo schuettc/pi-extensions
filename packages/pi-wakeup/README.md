@@ -11,7 +11,7 @@ Use it to re-check something without a human poking the session — a build that
 
 ## Countdown
 
-While a wakeup is pending, the session shows a live countdown to the soonest one: `17:34 · 12m · <reason>` (local fire time, whole minutes left, a truncated reason). Under a minute reads `<1m`; a missing reason drops that segment; more than one pending appends ` · +N`. It re-renders every 30 s (an unref'd interval) and immediately on schedule / fire / cancel / delivery failure, and clears when nothing is pending or on shutdown.
+While a wakeup is pending, the session shows a live countdown to the soonest one: `17:34 · 12m · <reason>` (local fire time, whole minutes left, a truncated reason). Under a minute reads `<1m`; a missing reason drops that segment; more than one pending appends ` · +N [6m, 11m]`, the minutes left on the next two others (`…` when there are more). It re-renders every 30 s (an unref'd interval) and immediately on schedule / fire / cancel / delivery failure, and clears when nothing is pending or on shutdown.
 
 Where it shows is decided once at session start:
 
