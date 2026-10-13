@@ -39,3 +39,84 @@ export function wakeupMessage(prompt: string, reason: string): string {
   const suffix = trimmedReason ? `\n\n(scheduled wakeup — ${trimmedReason})` : "";
   return `${prompt}${suffix}`;
 }
+
+// --- Countdown display -----------------------------------------------------
+// The session's pending wakeups, shown with a live countdown so a human can
+// see what the session is waiting on and when it restarts. Pure here (text +
+// mode decision); the I/O — reading tmux, writing a widget or a tmux option —
+// lives in index.ts.
+
+// A pending wakeup, reduced to just what the countdown needs: when it fires and
+// why. index.ts carries the full record (prompt, timer handle); this is the
+// view the formatter sees.
+export type PendingView = { fireAtMs: number; reason: string };
+
+// Reasons are shown inline in a status bar, so a long one is truncated to keep
+// the line short; the ellipsis marks the cut.
+export const MAX_REASON_LENGTH = 25;
+
+export function truncateReason(reason: string, max = MAX_REASON_LENGTH): string {
+  const trimmed = typeof reason === "string" ? reason.trim() : "";
+  if (trimmed.length <= max) return trimmed;
+  // Reserve one char for the ellipsis so the result is exactly `max` wide.
+  return `${trimmed.slice(0, max - 1)}…`;
+}
+
+// Whole minutes remaining until a fire time. Anything under a minute (including
+// a fire time already past, if a refresh races the timer) collapses to `<1m`
+// rather than showing `0m`.
+export function formatRemaining(remainingMs: number): string {
+  if (remainingMs < 60_000) return "<1m";
+  return `${Math.floor(remainingMs / 60_000)}m`;
+}
+
+// The countdown line for the soonest pending wakeup:
+//   `17:34 · 12m · <reason>`  (fire time, minutes remaining, truncated reason)
+// A missing reason drops that segment; more than one pending appends
+// ` · +N [6m, 11m]`, the others' minutes left, capped at MAX_OTHER_TIMES with
+// `…` for the rest.
+// Returns undefined when nothing is pending, so the caller clears the display.
+// The HH:MM formatter is injected so tests need not depend on the machine's TZ.
+export function formatCountdown(
+  pending: PendingView[],
+  nowMs: number,
+  formatHHMM: (ms: number) => string,
+): string | undefined {
+  if (pending.length === 0) return undefined;
+  // Soonest fire time first — that's the one we count down to.
+  const sorted = [...pending].sort((a, b) => a.fireAtMs - b.fireAtMs);
+  const soonest = sorted[0];
+  const parts = [formatHHMM(soonest.fireAtMs), formatRemaining(soonest.fireAtMs - nowMs)];
+  const reason = truncateReason(soonest.reason ?? "");
+  if (reason) parts.push(reason);
+  let text = parts.join(" · ");
+  const others = sorted.slice(1);
+  if (others.length > 0) {
+    const times = others.slice(0, MAX_OTHER_TIMES).map((w) => formatRemaining(w.fireAtMs - nowMs));
+    if (others.length > MAX_OTHER_TIMES) times.push("…");
+    text += ` · +${others.length} [${times.join(", ")}]`;
+  }
+  return text;
+}
+
+// How many of the other pending wakeups list their time after `+N`; two keeps
+// the status bar to one short line.
+export const MAX_OTHER_TIMES = 2;
+
+// Where the countdown shows, decided ONCE at session_start. The tmux bar is
+// used only when this pane is inside tmux AND the server's global status line
+// actually renders `@wakeup` (otherwise the option we set would go nowhere);
+// everything else falls back to a widget above the pi editor.
+export type DisplayMode = "tmux" | "widget";
+
+export function decideDisplayMode(
+  env: { TMUX?: string; TMUX_PANE?: string },
+  statusLeft: string | undefined,
+  statusRight: string | undefined,
+): DisplayMode {
+  if (!env.TMUX || !env.TMUX_PANE) return "widget";
+  const left = statusLeft ?? "";
+  const right = statusRight ?? "";
+  if (left.includes("@wakeup") || right.includes("@wakeup")) return "tmux";
+  return "widget";
+}
