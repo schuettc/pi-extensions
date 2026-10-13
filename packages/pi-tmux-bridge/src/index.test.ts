@@ -655,3 +655,34 @@ test("with nothing held or delivered by the channel the drain runs as before", a
   assert.equal(stopCalls.length, 1);
   assert.equal(sent.length, 1);
 });
+
+// Activity (working/idle) on the bus row: agent_start fires for every turn,
+// including one channels.tools starts at a settle, so marking working here
+// covers turns the user did not type. Stop on each settle marks idle.
+test("agent_start marks the session working", async () => {
+  const { pi, fire } = fakePi();
+  const musterCalls: Array<{ args: string[]; input: string }> = [];
+  createHarness(pi as never, { raiseAttention: noopBell,
+    tmux: () => ctxTmux,
+    runTmux: noopTmux,
+    runMuster: (_c, args, input) => { musterCalls.push({ args, input }); return ""; },
+  });
+  await fire("agent_start");
+  await fire("agent_start");
+  const prompts = musterCalls.filter((c) => c.args[1] === "UserPromptSubmit");
+  assert.equal(prompts.length, 2, "one UserPromptSubmit per agent_start");
+  assert.deepEqual(prompts[0].args, ["hook", "UserPromptSubmit", "pi"]);
+  assert.deepEqual(JSON.parse(prompts[0].input), { session_id: "sess-1" });
+});
+
+test("agent_start in a non-tui session calls nothing", async () => {
+  const { pi, ctx, fire } = fakePi();
+  const musterCalls: unknown[] = [];
+  createHarness(pi as never, { raiseAttention: noopBell,
+    tmux: () => ctxTmux,
+    runTmux: noopTmux,
+    runMuster: (_c, args) => { musterCalls.push(args); return ""; },
+  });
+  await fire("agent_start", {}, { ...ctx, mode: "print" });
+  assert.deepEqual(musterCalls, [], "a subagent's turn must not mark the pane's rows working");
+});

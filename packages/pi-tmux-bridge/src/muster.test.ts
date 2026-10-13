@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { register, sessionStart, drain, sessionEnd, become } from "./muster.ts";
+import { register, sessionStart, drain, sessionEnd, become, promptStart } from "./muster.ts";
 import type { Run } from "./muster.ts";
 
 type Call = { cmd: string; args: string[]; input: string };
@@ -120,4 +120,17 @@ test("a throwing hook yields an empty outcome rather than propagating", () => {
     assert.equal(out.reason, undefined);
     assert.equal(out.stdout, "");
   });
+});
+
+test("promptStart calls muster hook UserPromptSubmit pi with the session id", () => {
+  const r = recorder();
+  promptStart({ sessionId: "s1", run: r.run });
+  assert.equal(r.calls.length, 1);
+  assert.deepEqual(r.calls[0].args, ["hook", "UserPromptSubmit", "pi"]);
+  assert.deepEqual(JSON.parse(r.calls[0].input), { session_id: "s1" });
+});
+
+test("promptStart swallows a failing run", () => {
+  const boom: Run = () => { throw new Error("muster down"); };
+  assert.doesNotThrow(() => promptStart({ sessionId: "s1", run: boom }));
 });

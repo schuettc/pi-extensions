@@ -96,6 +96,15 @@ export function drain(
   return outcome;
 }
 
+// hook UserPromptSubmit pi marks this session's bus rows working, so a
+// coordinator reading list_agents can tell a busy peer from a stalled one.
+// The idle side needs no call of its own: the Stop hook drain() sends on
+// every settle marks the rows idle unless it hands the agent mail.
+export function promptStart(opts: { sessionId: string; run?: Run }): void {
+  const run = opts.run ?? defaultRun;
+  callHook("UserPromptSubmit", { session_id: opts.sessionId }, run);
+}
+
 export function sessionEnd(opts: { sessionId: string; run?: Run }): void {
   const run = opts.run ?? defaultRun;
   // sessionId is sent so muster tombstones only this pane's rows, not every
