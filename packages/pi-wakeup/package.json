@@ -1,6 +1,6 @@
 {
   "name": "pi-wakeup",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "schedule_wakeup / cancel_wakeup for the pi coding agent: session-local self-pacing, the pi analog of Claude Code's ScheduleWakeup dynamic mode.",
   "type": "module",
   "license": "MIT",

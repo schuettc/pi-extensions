@@ -40,6 +40,7 @@ function harness(
       return idle;
     },
     ui: {
+      theme: { fg: (color: string, text: string) => `<${color}>${text}` },
       notify: (text: string, level: string) => notifies.push({ text, level }),
       setWidget: (key: string, lines: string[] | undefined) => {
         if (opts.widgetThrows) throw new Error("stale widget ctx");
@@ -252,6 +253,7 @@ test("widget mode: scheduling shows a line above the editor and arms a refresh",
   assert.equal(last.lines!.length, 1);
   assert.match(last.lines![0], /2m/); // 120s from now()=1000 -> 2m remaining
   assert.match(last.lines![0], /CI/);
+  assert.match(last.lines![0], /^<warning>⏰ /); // styled like the tmux bar
   assert.equal(h.intervals.length, 1);
   assert.equal(h.intervals[0].cancelled, false);
   // The tmux runner is never touched in widget mode.
