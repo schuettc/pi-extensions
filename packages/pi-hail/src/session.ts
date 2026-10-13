@@ -632,7 +632,7 @@ export class Session {
    * echoes it unchanged as a sibling on every frame it replays for this request
    * and on the terminal done \u2014 the daemon reads it and forwards only `event`. A
    * resend WITHOUT a claim is a protocol error: pi-hail logs a diag and still
-   * answers done (without a claim) so the daemon never waits forever. The daemon
+   * answers done (without a claim) so the daemon is answered when the socket is alive (otherwise its backstop ends the claim). The daemon
    * requires 0.8.0, so this never happens in the release.
    */
   onResend(since: number, limit = 0, claim?: string): void {
@@ -645,7 +645,7 @@ export class Session {
       return;
     }
     // Reading entries can throw on a torn-down/stale context; the catch-up must
-    // still end so the daemon never waits forever (spec D1').
+    // still end on a live socket (the daemon's backstop covers a dead one; spec D1').
     let trimmed: ReturnType<typeof trimFrames>;
     try {
       trimmed = trimFrames(entriesAfter(this.deps.getEntries(), since), limit);

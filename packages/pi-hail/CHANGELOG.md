@@ -11,7 +11,7 @@
   never inspected or mutated; two concurrent resends keep their own claims on
   their own frames and dones. A `resend` without a claim is a protocol error:
   pi-hail logs a `{ diag }` and still answers `{ resend: "done" }` (without a
-  claim) so the daemon never waits forever — the daemon requires 0.8.0, so this
+  claim) so the daemon is answered when the socket is alive (an inactive session or a failed socket may send nothing; the daemon's backstop ends the claim) — the daemon requires 0.8.0, so this
   never happens in the release.
 - **Busy prompts are refused via pi's idle check.** Before injecting a phone
   prompt, pi-hail now calls pi's `isIdle()` (a method of the `ExtensionContext`).
