@@ -2,6 +2,17 @@
 
 ## 0.8.0
 
+- **The daemon's opaque resend `claim` is echoed on catch-up (decided
+  2026-10-13).** The daemon's `{ resend: { since, limit } }` now carries an
+  opaque `claim` (a string). pi-hail echoes it unchanged as a sibling on every
+  frame it replays for that request (`{ event, cursor, claim }` — the daemon
+  reads the claim and forwards only `event`) and on the terminal
+  `{ resend: "done", claim }` / `{ resend: "done", error, claim }`. The claim is
+  never inspected or mutated; two concurrent resends keep their own claims on
+  their own frames and dones. A `resend` without a claim is a protocol error:
+  pi-hail logs a `{ diag }` and still answers `{ resend: "done" }` (without a
+  claim) so the daemon never waits forever — the daemon requires 0.8.0, so this
+  never happens in the release.
 - **Busy prompts are refused via pi's idle check.** Before injecting a phone
   prompt, pi-hail now calls pi's `isIdle()` (a method of the `ExtensionContext`).
   If pi is not idle (still streaming), the prompt is refused on the existing

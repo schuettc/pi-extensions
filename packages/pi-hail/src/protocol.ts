@@ -53,7 +53,7 @@ export type RegisterReply =
 
 /** Extension → daemon, one JSON object per line after register. */
 export type Outbound =
-  | { event: unknown; cursor?: number; replay?: boolean }
+  | { event: unknown; cursor?: number; replay?: boolean; claim?: string }
   | { turn: "start" | "end" }
   | { lock: "held" | "released" }
   | { exit: { code: number } }
@@ -61,7 +61,7 @@ export type Outbound =
   | { refused: { requestId: string; reason: "error"; error: string } }
   | { accepted: { requestId: string } }
   | { connection: "connect" | "disconnect" }
-  | { resend: "done"; error?: string }
+  | { resend: "done"; error?: string; claim?: string }
   | { diag: { where: string; message: string } }
   | {
       ask: {
@@ -88,7 +88,7 @@ export type Inbound =
   | { answer: { requestId: string; value: unknown } }
   | { ctl: "stop" }
   | { connection: "connected" | "disconnected" | "unavailable" }
-  | { resend: { since: number } };
+  | { resend: { since: number; limit?: number; claim?: string } };
 
 /** Serialize an object to a single NDJSON line (JSON + trailing newline). */
 export function encodeLine(obj: unknown): string {
