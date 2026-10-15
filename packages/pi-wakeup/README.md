@@ -27,7 +27,7 @@ Every tmux / UI call is best-effort: a failure in a timer callback is caught and
 
 ## Design
 
-- **Session-local.** A wakeup is an in-process `setTimeout`, not a cron job. It lives and dies with the session. This is deliberate: subagents and pacing in pi are in-process (the muster-teammate shape is shelved), and cross-session scheduling is a different product (`cron` + `pi -p`), not this tool.
+- **Session-local.** A wakeup is an in-process `setTimeout`, not a cron job. It lives and dies with the session, and survives `/reload`: the pending wakeups are handed to the reloaded extension, which re-arms each one for the time it had left. This is deliberate: subagents and pacing in pi are in-process (the muster-teammate shape is shelved), and cross-session scheduling is a different product (`cron` + `pi -p`), not this tool.
 - **Busy-gated delivery.** `agent_start` / `agent_settled` track whether a turn is running; delivery picks `steer` (idle) or `followUp` (busy) accordingly, so a wakeup never interrupts a turn in flight.
 - **Best-effort.** Every handler and the timer callback swallow-and-log on error — a missed wakeup must never take the session process down. The pure decisions (clamp, delivery mode, message shape) live in `src/schedule.ts` and are unit-tested with zero mocking; `src/index.ts` is the thin pi wiring, in the same split the guardrails package uses.
 - **Persistence.** Each schedule / fire / cancel is written with `pi.appendEntry` so the session transcript records the wakeup lifecycle.

@@ -10,7 +10,7 @@ A running pi session keeps the code it loaded at startup, but it loads anything 
 
 - **At session start** it records a fingerprint: the `packages` list in `settings.json`, plus the version and modification time of each installed npm package, plus the modification time of each channel server's executable. The channel servers are read from `~/.pi/agent/channels.json` and the project's `.pi/channels.json`, and a bare command name is looked up on `PATH`.
 - **Every 15 seconds, and whenever the agent finishes a run,** it checks the fingerprint again. When it changes, the status bar shows `update installed · reloading when idle`.
-- **It reloads only when the session is idle:** no response streaming, no queued messages, and no permission or other prompt open. A busy session reloads when it finishes.
+- **It reloads only when the session is idle:** no response streaming, no queued messages, no permission or other prompt open, and no [pi-subagents](https://github.com/tintinweb/pi-subagents) agent running or queued (a reload would abort them). A busy session reloads when it finishes.
 - **The reload is pi's own `/reload`:** the extension runs a hidden `/auto-reload-now` command that calls `reload()`. Nothing is sent to the model, and a half-typed draft in the editor is kept.
 
 ## Install

@@ -113,8 +113,24 @@ export function channelServerExecutables(opts: { home: string; cwd: string; path
   return found;
 }
 
+// pi-subagents publishes its manager on this global for other packages
+// (its docs/rpc.md, "The manager registry"). A reload shuts every extension
+// down, and pi-subagents aborts its running agents on shutdown, so a reload
+// waits while any are running or queued.
+const SUBAGENTS_KEY = Symbol.for("pi-subagents:manager");
+
+export function subagentsRunning(): boolean {
+  const manager = (globalThis as Record<symbol, { hasRunning?: () => unknown } | undefined>)[SUBAGENTS_KEY];
+  try {
+    return typeof manager?.hasRunning === "function" && Boolean(manager.hasRunning());
+  } catch {
+    return false;
+  }
+}
+
 export interface AutoReloadDeps {
   fingerprint?: () => string;
+  subagentsRunning?: () => boolean;
   pollMs?: number;
   setInterval?: (fn: () => void, ms: number) => { unref?: () => void };
   clearInterval?: (handle: unknown) => void;
@@ -130,6 +146,7 @@ export function createAutoReload(pi: ExtensionAPI, deps: AutoReloadDeps = {}): v
     ...extra,
     ...channelServerExecutables({ home: homedir(), cwd, path: process.env.PATH ?? "" }),
   ]));
+  const busySubagents = deps.subagentsRunning ?? subagentsRunning;
   const pollMs = deps.pollMs ?? 15_000;
   const every = deps.setInterval ?? ((fn: () => void, ms: number) => setInterval(fn, ms));
   const stop = deps.clearInterval ?? ((handle: unknown) => clearInterval(handle as NodeJS.Timeout));
@@ -145,7 +162,7 @@ export function createAutoReload(pi: ExtensionAPI, deps: AutoReloadDeps = {}): v
     const ctx = ctxRef;
     if (!pending || triggered || promptOpen || !ctx) return;
     try {
-      if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+      if (!ctx.isIdle() || ctx.hasPendingMessages() || busySubagents()) return;
     } catch {
       return; // stale context: the session was already replaced
     }
