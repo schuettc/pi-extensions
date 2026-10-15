@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { channelServerExecutables, createAutoReload, npmPackageName, packagesFingerprint, RELOAD_COMMAND } from "./index.ts";
+import { channelServerExecutables, createAutoReload, npmPackageName, packagesFingerprint, RELOAD_COMMAND, subagentsRunning } from "./index.ts";
 
 test("npmPackageName strips versions, keeps scopes, ignores non-npm specs", () => {
   assert.equal(npmPackageName("npm:@schuettc/pi-auto-review@0.20.0-schuettc.3"), "@schuettc/pi-auto-review");
@@ -81,13 +81,14 @@ test("the fingerprint changes when a channel server binary is replaced", () => {
   assert.notEqual(packagesFingerprint(dir, [binary]), before);
 });
 
-function harness(opts: { idle?: boolean; pending?: boolean } = {}) {
+function harness(opts: { idle?: boolean; pending?: boolean; subagents?: boolean } = {}) {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   const sent: Array<{ text: string; options: unknown }> = [];
   const statuses: string[] = [];
   let fp = "v1";
   let idle = opts.idle ?? true;
+  let subagents = opts.subagents ?? false;
   let tick: (() => void) | undefined;
   let cleared = false;
   const pi = {
@@ -97,6 +98,7 @@ function harness(opts: { idle?: boolean; pending?: boolean } = {}) {
   } as unknown as ExtensionAPI;
   createAutoReload(pi, {
     fingerprint: () => fp,
+    subagentsRunning: () => subagents,
     pollMs: 1_000,
     setInterval: (fn) => { tick = fn; return {}; },
     clearInterval: () => { cleared = true; },
@@ -112,6 +114,7 @@ function harness(opts: { idle?: boolean; pending?: boolean } = {}) {
     update: () => { fp = `v${Math.random()}`; },
     tick: () => tick!(),
     setIdle: (v: boolean) => { idle = v; },
+    setSubagents: (v: boolean) => { subagents = v; },
     wasCleared: () => cleared,
   };
 }
@@ -146,6 +149,30 @@ test("queued messages defer the reload", () => {
   h.update();
   h.tick();
   assert.equal(h.sent.length, 0);
+});
+
+test("running subagents defer the reload until they finish", () => {
+  const h = harness({ subagents: true });
+  h.update();
+  h.tick();
+  assert.equal(h.sent.length, 0, "a reload would abort them");
+  h.setSubagents(false);
+  h.tick();
+  assert.equal(h.sent.length, 1);
+});
+
+test("subagentsRunning reads the pi-subagents manager registry", () => {
+  const key = Symbol.for("pi-subagents:manager");
+  const g = globalThis as Record<symbol, unknown>;
+  assert.equal(subagentsRunning(), false, "no pi-subagents loaded");
+  g[key] = { hasRunning: () => true };
+  try {
+    assert.equal(subagentsRunning(), true);
+    g[key] = { hasRunning: () => false };
+    assert.equal(subagentsRunning(), false);
+  } finally {
+    delete g[key];
+  }
 });
 
 test("the hidden command reloads; a new session re-baselines; shutdown stops polling", async () => {

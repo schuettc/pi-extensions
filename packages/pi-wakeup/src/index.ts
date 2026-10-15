@@ -18,7 +18,9 @@
 // pi.appendEntry so the session transcript records the wakeup lifecycle.
 // Re-arming a pending wakeup across a session RESUME is a documented follow-up
 // (the extension API exposes no entry read-back). Within a live session,
-// wakeups fire.
+// wakeups fire, including across /reload: a reload shuts this extension down
+// and loads a fresh copy in the same process, so shutdown hands the pending
+// wakeups to the new copy through a global, which re-arms them on start.
 
 import { execFileSync } from "node:child_process";
 import {
@@ -32,6 +34,11 @@ import {
 // fireAtMs is tracked per pending wakeup so the countdown display can derive
 // how long is left; it's the same value persisted in the wakeup_scheduled entry.
 type Pending = { prompt: string; reason: string; fireAtMs: number };
+
+// Where a shutdown for /reload leaves the pending wakeups (and the id counter,
+// so new ids don't collide) for the freshly loaded copy to pick up.
+const HANDOFF_KEY = Symbol.for("pi-wakeup:reload-handoff");
+type Handoff = { counter: number; pending: Array<[string, Pending]> };
 
 // How often the countdown re-renders while anything is pending. The interval is
 // unref'd so it never holds the process open on its own.
@@ -316,14 +323,27 @@ export function createWakeup(pi: any, deps: Deps = {}): void {
     }
   }
 
-  pi.on("session_start", (_event: unknown, sessionCtx: any) => {
+  pi.on("session_start", (event: any, sessionCtx: any) => {
     ctx = sessionCtx;
     // Decide the display target once, now, from the env + tmux status strings.
     decideDisplay();
-    // Nothing is pending at a fresh start, so this just clears any stale display.
-    refresh();
+    const store = globalThis as Record<symbol, Handoff | undefined>;
+    const handoff = event?.reason === "reload" ? store[HANDOFF_KEY] : undefined;
+    delete store[HANDOFF_KEY];
+    if (handoff) {
+      counter = handoff.counter;
+      for (const [id, w] of handoff.pending) {
+        pending.set(id, w);
+        timers.set(id, setTimer(() => deliver(id), Math.max(0, w.fireAtMs - now())));
+      }
+    }
+    // Shows the re-armed wakeups, or clears any stale display.
+    syncDisplay();
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (event: any) => {
+    if (event?.reason === "reload") {
+      (globalThis as Record<symbol, Handoff | undefined>)[HANDOFF_KEY] = { counter, pending: [...pending] };
+    }
     for (const handle of timers.values()) clearTimer(handle);
     timers.clear();
     pending.clear();

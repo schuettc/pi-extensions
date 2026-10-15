@@ -21,6 +21,9 @@ function harness(
     // Make a tmux call or setWidget throw, to prove containment.
     tmuxThrows?: boolean;
     widgetThrows?: boolean;
+    // The session_start event (a reload re-arms handed-over wakeups) and clock.
+    startEvent?: unknown;
+    nowMs?: number;
   } = {},
 ) {
   const idle = opts.idle ?? true;
@@ -74,7 +77,7 @@ function harness(
     clearTimer: (handle: unknown) => {
       (handle as Timer).cancelled = true;
     },
-    now: () => 1000,
+    now: () => opts.nowMs ?? 1000,
     setInterval: (fn: () => void, ms: number) => {
       const i: Interval = { fn, ms, cancelled: false };
       intervals.push(i);
@@ -98,7 +101,7 @@ function harness(
 
   createWakeup(pi, deps);
   // Prime the captured ctx as a real session would via session_start.
-  handlers.get("session_start")?.(undefined, ctx);
+  handlers.get("session_start")?.(opts.startEvent, ctx);
 
   const schedule = (params: any) =>
     tools.get("schedule_wakeup").execute("call", params, undefined, undefined, ctx);
@@ -241,6 +244,38 @@ test("session_shutdown clears every timer and no wakeup can still deliver", asyn
   // Even if a stray timer callback still ran, pending was cleared, so nothing delivers.
   h.timers.forEach((t) => t.fn());
   assert.equal(h.sent.length, 0);
+});
+
+test("a /reload hands pending wakeups to the new copy, which re-arms them for the time left", async () => {
+  const before = harness();
+  await before.schedule({ delay_seconds: 120, prompt: "a", reason: "ci" });
+  await before.schedule({ delay_seconds: 200, prompt: "b" });
+  await before.cancel({ id: "wake-2" });
+  before.handlers.get("session_shutdown")!({ reason: "reload" });
+  assert.ok(before.timers.every((t) => t.cancelled));
+
+  const after = harness({ startEvent: { reason: "reload" }, nowMs: 31_000 });
+  assert.equal(after.timers.length, 1);
+  assert.equal(after.timers[0].ms, 90_000, "120s scheduled at t=1s, reloaded at t=31s");
+  after.fire(after.timers[0]);
+  assert.equal(after.sent.length, 1);
+  assert.match(after.sent[0].msg.content, /a/);
+  await after.schedule({ delay_seconds: 60, prompt: "c" });
+  assert.match(after.entries.at(-1)!.data.id, /wake-3/, "ids continue, not reused");
+});
+
+test("a quit hands nothing over, and a fresh start re-arms nothing", async () => {
+  const before = harness();
+  await before.schedule({ delay_seconds: 120, prompt: "a" });
+  before.handlers.get("session_shutdown")!({ reason: "quit" });
+  const after = harness({ startEvent: { reason: "reload" } });
+  assert.equal(after.timers.length, 0);
+
+  const reloaded = harness();
+  await reloaded.schedule({ delay_seconds: 120, prompt: "a" });
+  reloaded.handlers.get("session_shutdown")!({ reason: "reload" });
+  const fresh = harness({ startEvent: { reason: "startup" } });
+  assert.equal(fresh.timers.length, 0);
 });
 
 // --- Countdown display -----------------------------------------------------
