@@ -11,7 +11,7 @@ function fakeCasebook(): { bin: string; log: string } {
   const log = join(dir, "log");
   const bin = join(dir, "casebook");
   writeFileSync(bin, `#!/bin/sh
-if [ "$1" = brief ]; then echo "casebook: schuettc/hail: 1 item(s) need attention"; exit 0; fi
+if [ "$1" = brief ]; then echo "casebook: subaud-tools/hail: 1 item(s) need attention"; exit 0; fi
 { echo "ARGS $* SESSION=$AGENT_SESSION_ID"; cat; echo; } >> '${log}'
 `, { mode: 0o755 });
   return { bin, log };
