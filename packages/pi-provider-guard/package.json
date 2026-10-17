@@ -1,6 +1,6 @@
 {
   "name": "pi-provider-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A pi coding-agent extension that keeps pi off the metered anthropic provider and appends user-supplied harness policy prose to every turn.",
   "type": "module",
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "pi-bang",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React to `!` shell commands: when a user-run bash command completes, trigger a model turn so the session responds to the output instead of waiting for the next prompt.",
   "type": "module",
   "license": "MIT",
