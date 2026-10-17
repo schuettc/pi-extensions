@@ -1,0 +1,12 @@
+# The workflow actions: take each release as a PR (CI runs on it like any
+# change). Other dependencies are updated by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore(deps)"
