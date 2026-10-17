@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/schuettc/pi-extensions.git",
+    "url": "git+https://github.com/subaud-tools/pi-extensions.git",
     "directory": "packages/pi-casebook"
   },
   "keywords": [

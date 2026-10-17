@@ -12,7 +12,7 @@ A [pi coding agent](https://github.com/earendil-works/pi-coding-agent) extension
 
 ## Requirements
 
-The `casebook` binary must be installed. It is distributed via the kempt manifest at `tackle/cmd/casebook/kempt.toml`. Install it with [kempt](https://github.com/schuettc/kempt).
+The `casebook` binary must be installed. It is distributed via the kempt manifest at `tackle/cmd/casebook/kempt.toml`. Install it with [kempt](https://github.com/subaud-tools/kempt).
 
 ## Inert without the binary
 
